@@ -1,0 +1,6 @@
+interface:
+  display_name: "US Stock Screener"
+  short_description: "Daily US stock screening helper"
+  default_prompt: "Use $us-stock-screener to rank a US stock universe, explain the top candidates, and flag the main risks."
+policy:
+  allow_implicit_invocation: true

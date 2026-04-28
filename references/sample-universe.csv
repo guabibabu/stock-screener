@@ -1,0 +1,5 @@
+ticker,price,market_cap,avg_volume_20d,revenue_growth_yoy,eps_growth_yoy,gross_margin,operating_margin,return_on_equity,pe_ratio,ps_ratio,relative_strength_252d,price_vs_sma50_pct,price_vs_sma200_pct,beta,volatility_63d,max_drawdown_252d,data_age_days
+AAPL,200,3000000000000,40000000,7,12,45,31,145,31,8,82,5,10,1.1,20,13,1
+MSFT,420,3100000000000,18000000,15,18,69,45,35,34,12,88,8,15,0.95,18,11,1
+NVDA,900,2200000000000,22000000,62,88,74,61,83,38,22,95,14,28,1.7,36,19,1
+LOWV,20,5000000000,100000,3,2,18,7,6,52,5,35,-2,-6,1.4,33,26,2
