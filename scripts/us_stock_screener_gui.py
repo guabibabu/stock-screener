@@ -82,7 +82,7 @@ class ScreenerApp(tk.Tk):
         self.selected_candidate_ticker: str | None = None
         self.strategy_var = tk.StringVar(value="Hybrid")
         self.force_rebalance_var = tk.BooleanVar(value=False)
-        self.action_buttons: list[tk.Frame] = []
+        self.action_buttons: list[tk.Button] = []
         self.busy_var = tk.StringVar(value="就緒")
         self.is_busy = False
         self.busy_started_at: float | None = None
@@ -93,8 +93,7 @@ class ScreenerApp(tk.Tk):
         self._build_theme()
         self._build_ui()
         self._show_empty_state()
-        self.after(250, self._nudge_window_for_macos_tk_click_bug)
-        self.after(1000, self._nudge_window_for_macos_tk_click_bug)
+        self.after_idle(self._focus_main_window)
 
     def _pick_font_family(self, *candidates: str) -> str:
         available = set(tkfont.families(self))
@@ -680,94 +679,78 @@ class ScreenerApp(tk.Tk):
         text.configure(yscrollcommand=scroll.set)
         return text
 
-    def _button(self, parent: tk.Widget, text: str, command, color: str) -> tk.Frame:
+    def _button(self, parent: tk.Widget, text: str, command, color: str) -> tk.Button:
         is_primary = text == "更新並篩選"
         default_bg = self.palette["accent"] if is_primary else self.palette["button_secondary"]
         hover_bg = "#1d4ed8" if is_primary else self.palette["button_secondary_hover"]
         pressed_bg = "#1e40af" if is_primary else self.palette["line_strong"]
-        disabled_bg = self.palette["line"]
         text_fg = "#ffffff" if is_primary else self.palette["ink"]
         disabled_fg = self.palette["muted_ink"]
 
-        card = tk.Frame(
+        button = tk.Button(
             parent,
-            bg=default_bg,
-            highlightthickness=1,
-            highlightbackground=default_bg,
-            cursor="hand2",
-            takefocus=1,
-        )
-        label = tk.Label(
-            card,
             text=text,
             bg=default_bg,
             fg=text_fg,
+            activebackground=hover_bg,
+            activeforeground=text_fg,
+            disabledforeground=disabled_fg,
             font=self.font_body_bold,
+            relief="flat",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=self.palette["line"],
+            highlightcolor=self.palette["accent"],
             cursor="hand2",
+            takefocus=1,
             pady=12 if is_primary else 10,
+            padx=12,
         )
-        label.pack(fill="x", padx=12)
 
-        card.action_enabled = True  # type: ignore[attr-defined]
-        card.default_bg = default_bg  # type: ignore[attr-defined]
-        card.hover_bg = hover_bg  # type: ignore[attr-defined]
-        card.pressed_bg = pressed_bg  # type: ignore[attr-defined]
-        card.disabled_bg = disabled_bg  # type: ignore[attr-defined]
-        card.text_fg = text_fg  # type: ignore[attr-defined]
-        card.disabled_fg = disabled_fg  # type: ignore[attr-defined]
-        card.action_label = label  # type: ignore[attr-defined]
-
-        def _paint(bg: str, fg: str | None = None) -> None:
-            label_fg = fg if fg is not None else card.text_fg  # type: ignore[attr-defined]
-            card.config(bg=bg, highlightbackground=bg)
-            label.config(bg=bg, fg=label_fg)
+        button.default_bg = default_bg  # type: ignore[attr-defined]
+        button.hover_bg = hover_bg  # type: ignore[attr-defined]
+        button.pressed_bg = pressed_bg  # type: ignore[attr-defined]
+        button.text_fg = text_fg  # type: ignore[attr-defined]
 
         def _enabled() -> bool:
-            return bool(getattr(card, "action_enabled", True))
+            return str(button.cget("state")) != tk.DISABLED
 
-        def _run_action(_event=None) -> str:
+        def _paint(bg: str) -> None:
+            if _enabled():
+                button.config(bg=bg, activebackground=bg)
+
+        def _run_action() -> None:
             if not _enabled():
                 self._set_status("目前正在執行，請等它完成。")
-                return "break"
+                return
             self._set_status(f"已收到操作：{text}")
-            self.after(1, command)
-            return "break"
+            command()
 
         def _on_enter(_event=None) -> None:
-            if _enabled():
-                _paint(card.hover_bg)  # type: ignore[attr-defined]
+            _paint(button.hover_bg)  # type: ignore[attr-defined]
 
         def _on_leave(_event=None) -> None:
-            if _enabled():
-                _paint(card.default_bg)  # type: ignore[attr-defined]
+            _paint(button.default_bg)  # type: ignore[attr-defined]
 
-        def _on_press(_event=None) -> str:
-            if _enabled():
-                _paint(card.pressed_bg)  # type: ignore[attr-defined]
-            return "break"
+        def _on_press(_event=None) -> None:
+            _paint(button.pressed_bg)  # type: ignore[attr-defined]
 
-        def _on_release(_event=None) -> str:
-            if _enabled():
-                _paint(card.hover_bg)  # type: ignore[attr-defined]
-                return _run_action()
-            return "break"
+        def _on_release(_event=None) -> None:
+            _paint(button.hover_bg)  # type: ignore[attr-defined]
 
-        for widget in (card, label):
-            widget.bind("<Enter>", _on_enter)
-            widget.bind("<Leave>", _on_leave)
-            widget.bind("<ButtonPress-1>", _on_press)
-            widget.bind("<ButtonRelease-1>", _on_release)
-        card.bind("<Return>", _run_action)
-        card.bind("<space>", _run_action)
-        return card
+        button.configure(command=_run_action)
+        button.bind("<Enter>", _on_enter)
+        button.bind("<Leave>", _on_leave)
+        button.bind("<ButtonPress-1>", _on_press)
+        button.bind("<ButtonRelease-1>", _on_release)
+        return button
 
-    def _set_action_enabled(self, widget: tk.Frame, enabled: bool) -> None:
-        widget.action_enabled = enabled  # type: ignore[attr-defined]
-        bg = widget.default_bg if enabled else widget.disabled_bg  # type: ignore[attr-defined]
-        fg = widget.text_fg if enabled else widget.disabled_fg  # type: ignore[attr-defined]
+    def _set_action_enabled(self, widget: tk.Button, enabled: bool) -> None:
+        bg = widget.default_bg if enabled else self.palette["line"]  # type: ignore[attr-defined]
+        fg = widget.text_fg if enabled else self.palette["muted_ink"]  # type: ignore[attr-defined]
         cursor = "hand2" if enabled else "arrow"
-        widget.config(bg=bg, highlightbackground=bg, cursor=cursor)
-        widget.action_label.config(bg=bg, fg=fg, cursor=cursor)  # type: ignore[attr-defined]
+        state = tk.NORMAL if enabled else tk.DISABLED
+        widget.config(bg=bg, fg=fg, activebackground=bg, cursor=cursor, state=state)
 
     def _focus_main_window(self) -> None:
         try:
@@ -776,6 +759,8 @@ class ScreenerApp(tk.Tk):
             pass
 
     def _nudge_window_for_macos_tk_click_bug(self) -> None:
+        # Kept as an emergency manual hook, but no longer scheduled at startup.
+        # The geometry nudge caused a short period where macOS/Tk missed clicks.
         if sys.platform != "darwin":
             return
         try:
@@ -841,9 +826,12 @@ class ScreenerApp(tk.Tk):
             self.worker_poll_after_id = self.after(80, self._poll_worker_queue)
 
     def _poll_worker_queue(self) -> None:
+        processed = 0
+        max_events_per_tick = 12
         try:
-            while True:
+            while processed < max_events_per_tick:
                 kind, payload = self.worker_queue.get_nowait()
+                processed += 1
                 if kind == "status":
                     self._set_status(payload)
                 elif kind == "refresh_failed":
@@ -859,7 +847,7 @@ class ScreenerApp(tk.Tk):
         except queue.Empty:
             pass
 
-        if self.is_busy:
+        if self.is_busy or not self.worker_queue.empty():
             self.worker_poll_after_id = self.after(80, self._poll_worker_queue)
         else:
             self.worker_poll_after_id = None
@@ -892,8 +880,9 @@ class ScreenerApp(tk.Tk):
         self.exclusion_text.insert(tk.END, "目前還沒有被排除的股票。")
         self.output.delete("1.0", tk.END)
         self.output.insert(tk.END, "這裡會顯示完整報告。")
-        for row in self.tree.get_children():
-            self.tree.delete(row)
+        rows = self.tree.get_children()
+        if rows:
+            self.tree.delete(*rows)
 
     def choose_file(self) -> None:
         file_path = filedialog.askopenfilename(
@@ -972,7 +961,9 @@ class ScreenerApp(tk.Tk):
         self.metric_candidates.value_label.config(text="0")
         self.metric_excluded.value_label.config(text="0")
         self.metric_snapshot.value_label.config(text="抓取失敗")
-        self.tree.delete(*self.tree.get_children())
+        rows = self.tree.get_children()
+        if rows:
+            self.tree.delete(*rows)
         self.detail_text.delete("1.0", tk.END)
         self.detail_text.insert(
             tk.END,
@@ -1170,8 +1161,9 @@ class ScreenerApp(tk.Tk):
             f"完成。策略模式：{report.strategy_mode}；季度檢查：{review_text}；硬篩通過 {report.hard_pass_count} 檔；目前只顯示前 {len(report.candidates)} 名。"
         )
 
-        for row in self.tree.get_children():
-            self.tree.delete(row)
+        rows = self.tree.get_children()
+        if rows:
+            self.tree.delete(*rows)
 
         for ticker, values in payload["table_rows"]:
             self.tree.insert(
