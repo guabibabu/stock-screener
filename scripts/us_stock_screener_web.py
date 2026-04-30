@@ -397,6 +397,8 @@ INDEX_HTML = r"""<!doctype html>
 
         <button id="runBtn" class="button primary">更新並篩選</button>
         <button id="sampleBtn" class="button secondary">只看離線示範資料</button>
+        <button id="downloadTxtBtn" class="button secondary" disabled>下載 TXT 報告</button>
+        <button id="downloadJsonBtn" class="button secondary" disabled>下載 JSON 報告</button>
 
         <div class="status" id="status">就緒。選好資料來源後按「更新並篩選」。</div>
         <div class="spinner"><span></span></div>
@@ -465,6 +467,13 @@ INDEX_HTML = r"""<!doctype html>
         timer = null;
         if (text) $('status').textContent = text;
       }
+      updateDownloadButtons();
+    }
+
+    function updateDownloadButtons() {
+      const enabled = !!latest && !document.body.classList.contains('busy');
+      $('downloadTxtBtn').disabled = !enabled;
+      $('downloadJsonBtn').disabled = !enabled;
     }
 
     function sourcePayload(overrideSource) {
@@ -540,6 +549,87 @@ INDEX_HTML = r"""<!doctype html>
         showDetail(report.candidates[0]);
       }
       renderExclusions(report);
+      updateDownloadButtons();
+    }
+
+    function buildTextReport(report) {
+      const lines = [
+        `來源：${report.source_name || 'web'}`,
+        `策略模式：${report.strategy_mode}`,
+        `季度檢查：${report.review_mode === 'quarterly_rebalance' ? '是' : '否'}`,
+        `輸入 ${report.universe_size} 檔`,
+        `min_score：${report.min_score ?? '未設定'}`,
+        `effective_min_score_source：${report.effective_min_score_source}`,
+        `top_n：${report.top_n}`,
+        `dedupe_company：${report.dedupe_company ? '啟用' : '未啟用'}`,
+        `hard_exclusion count：${report.hard_excluded_count}`,
+        `soft_penalty count：${report.soft_penalty_count}`,
+        `missing_data count：${report.missing_data_count}`,
+        `retry_failed_count：${report.retry_failed_count}`,
+        `fetch_failed_count：${report.fetch_failed_count}`,
+        `dedupe_removed_count：${report.dedupe_removed_count}`,
+        '',
+        '候選名單',
+        ''
+      ];
+      (report.candidates || []).forEach((item, index) => {
+        lines.push(`${index + 1}. ${item.ticker}`);
+        lines.push(`   總分：${item.total_score}`);
+        if (item.suggested_action) lines.push(`   動作：${item.suggested_action}`);
+        if (item.confidence_score !== null && item.confidence_score !== undefined) {
+          lines.push(`   信心：${item.confidence_label || 'N/A'} (${item.confidence_score})`);
+        }
+        lines.push(`   基本面：${item.fundamental_score ?? item.factor_scores?.fundamental ?? ''}`);
+        lines.push(`   動量：${item.momentum_score ?? item.factor_scores?.momentum ?? ''}`);
+        lines.push(`   風險安全：${item.risk_safety_score ?? item.factor_scores?.risk_safety ?? ''}`);
+        if (item.reasons && item.reasons.length) lines.push(`   理由：${item.reasons.join('；')}`);
+        if (item.risk_warnings && item.risk_warnings.length) lines.push(`   風險：${item.risk_warnings.join('；')}`);
+        if (item.confidence_notes && item.confidence_notes.length) lines.push(`   提醒：${item.confidence_notes.join('；')}`);
+        if (item.penalties && item.penalties.length) {
+          const penaltyText = item.penalties.map(p => `${p.reason} -${p.points}分`).join('；');
+          lines.push(`   扣分：${item.penalty_score}（${penaltyText}）`);
+        }
+        lines.push('');
+      });
+      if (report.hard_excluded && report.hard_excluded.length) {
+        lines.push('硬性剔除');
+        lines.push('');
+        report.hard_excluded.forEach(item => {
+          const d = (item.exclusion_details || [])[0] || {};
+          lines.push(`- ${item.ticker}：${item.excluded_reason || ''}｜類別 ${d.category || 'N/A'}｜原始值 ${d.raw_value ?? 'N/A'}｜正規化 ${d.normalized_value ?? 'N/A'}｜門檻 ${d.threshold ?? 'N/A'}`);
+        });
+      }
+      if (report.soft_penalties && report.soft_penalties.length) {
+        lines.push('');
+        lines.push('扣分標記');
+        lines.push('');
+        report.soft_penalties.forEach(item => {
+          const reasons = (item.reasons || []).join('；') || '有扣分';
+          lines.push(`- ${item.ticker}：扣分 ${item.penalty_score} 分，${reasons}`);
+        });
+      }
+      if (report.missing_data_warnings && report.missing_data_warnings.length) {
+        lines.push('');
+        lines.push('資料缺口提示');
+        lines.push('');
+        report.missing_data_warnings.forEach(item => {
+          const fields = (item.missing_fields || []).join('、') || '部分欄位缺失';
+          lines.push(`- ${item.ticker}：${fields}`);
+        });
+      }
+      return lines.join('\n');
+    }
+
+    function downloadText(filename, content, mimeType) {
+      const blob = new Blob([content], { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
     }
 
     function showDetail(item) {
@@ -596,6 +686,17 @@ INDEX_HTML = r"""<!doctype html>
     });
     $('runBtn').addEventListener('click', () => run());
     $('sampleBtn').addEventListener('click', () => run('sample_universe'));
+    $('downloadTxtBtn').addEventListener('click', () => {
+      if (!latest) return;
+      const stamp = (latest.snapshot && latest.snapshot.as_of) ? latest.snapshot.as_of : 'report';
+      downloadText(`us-stock-screener-${stamp}.txt`, buildTextReport(latest), 'text/plain;charset=utf-8');
+    });
+    $('downloadJsonBtn').addEventListener('click', () => {
+      if (!latest) return;
+      const stamp = (latest.snapshot && latest.snapshot.as_of) ? latest.snapshot.as_of : 'report';
+      downloadText(`us-stock-screener-${stamp}.json`, JSON.stringify(latest, null, 2), 'application/json;charset=utf-8');
+    });
+    updateDownloadButtons();
   </script>
 </body>
 </html>
