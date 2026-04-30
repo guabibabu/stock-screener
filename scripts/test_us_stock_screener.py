@@ -22,6 +22,7 @@ from fetch_yfinance_snapshot import (
     load_watchlist,
     save_snapshot,
 )
+from us_stock_screener_web import parse_uploaded_content, run_screen_request
 
 
 class FakeProvider:
@@ -876,6 +877,43 @@ class ScreenerTests(unittest.TestCase):
         self.assertEqual(loaded.source_name, "yfinance")
         self.assertEqual(loaded.records[0]["ticker"], "AAPL")
         self.assertEqual(loaded.warnings, ["AAPL: test warning"])
+
+    def test_web_parse_uploaded_ticker_csv(self) -> None:
+        kind, rows = parse_uploaded_content("watchlist.csv", "ticker\nAAPL\nMSFT\n")
+        self.assertEqual(kind, "tickers")
+        self.assertEqual(rows, ["AAPL", "MSFT"])
+
+    def test_web_parse_uploaded_record_csv(self) -> None:
+        content = "ticker,price,market_cap,avg_dollar_volume_20d\nAAPL,180,3000000000000,1000000000\n"
+        kind, rows = parse_uploaded_content("snapshot.csv", content)
+        self.assertEqual(kind, "records")
+        self.assertEqual(rows[0]["ticker"], "AAPL")
+        self.assertEqual(rows[0]["price"], "180")
+
+    def test_web_sample_universe_request_is_offline(self) -> None:
+        payload = {
+            "source_mode": "sample_universe",
+            "strategy_mode": "hybrid",
+            "force_rebalance": False,
+            "auto_fetch": False,
+        }
+        report = run_screen_request(payload)
+        self.assertEqual(report["source_name"], "離線示範資料")
+        self.assertEqual(report["strategy_mode"], "hybrid")
+        self.assertGreaterEqual(report["candidate_count"], 1)
+
+    def test_web_uploaded_records_can_screen_without_fetch(self) -> None:
+        content = "ticker,price,market_cap,avg_dollar_volume_20d\nAAPL,180,3000000000000,1000000000\n"
+        payload = {
+            "source_mode": "uploaded",
+            "filename": "snapshot.csv",
+            "content": content,
+            "strategy_mode": "hybrid",
+            "auto_fetch": False,
+        }
+        report = run_screen_request(payload)
+        self.assertEqual(report["source_name"], "snapshot.csv")
+        self.assertEqual(report["universe_size"], 1)
 
 
 if __name__ == "__main__":

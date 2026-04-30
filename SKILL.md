@@ -10,12 +10,13 @@ Canonical source: the installed skill at `~/.codex/skills/us-stock-screener/`. T
 ## Quick Start
 
 1. First-time use: open `launch_us_stock_screener.command` and choose a ticker list.
-2. Fastest auto-fetch path: use `references/sample-watchlist.csv`, click `更新並篩選`, and let the GUI build a fresh snapshot and ranking for you.
-3. Manual snapshot path: use `references/sample-universe.csv` if you already have price, market cap, and liquidity fields.
-4. Minimum required columns for the screener: `ticker`, `price`, `market_cap`, `avg_dollar_volume_20d` or `avg_volume_20d`.
-5. Strategy modes: `hybrid` for the default mixed ranking model, or `stop_checking_price` for the low-frequency quality screen.
-6. Default output: ranked candidates, total score, factor scores, reasons, risk warnings, confidence notes, and a clear exclusion list.
-7. If data is missing, the screener names the missing fields and lowers confidence instead of guessing.
+2. If the desktop GUI feels laggy, open `launch_us_stock_screener_web.command` to use the local browser version.
+3. Fastest auto-fetch path: use `references/sample-watchlist.csv`, click `更新並篩選`, and let the app build a fresh snapshot and ranking for you.
+4. Manual snapshot path: use `references/sample-universe.csv` if you already have price, market cap, and liquidity fields.
+5. Minimum required columns for the screener: `ticker`, `price`, `market_cap`, `avg_dollar_volume_20d` or `avg_volume_20d`.
+6. Strategy modes: `hybrid` for the default mixed ranking model, or `stop_checking_price` for the low-frequency quality screen.
+7. Default output: ranked candidates, total score, factor scores, reasons, risk warnings, confidence notes, and a clear exclusion list.
+8. If data is missing, the screener names the missing fields and lowers confidence instead of guessing.
 
 ## What Each File Does
 
@@ -56,8 +57,10 @@ Canonical source: the installed skill at `~/.codex/skills/us-stock-screener/`. T
 
 - `scripts/us_stock_screener.py`: CLI and library screener.
 - `scripts/us_stock_screener_gui.py`: Beginner-friendly GUI with the watchlist-to-snapshot flow.
+- `scripts/us_stock_screener_web.py`: Local browser UI that reuses the same screener core.
 - `scripts/fetch_yfinance_snapshot.py`: yfinance snapshot fetcher and CLI.
 - `launch_us_stock_screener.command`: Double-click launcher for macOS.
+- `launch_us_stock_screener_web.command`: Double-click launcher for the local web version.
 - `scripts/test_us_stock_screener.py`: Deterministic dry-run tests with mock data.
 - `references/data-contract.md`: Expected input fields and synonyms.
 - `references/strategy.md`: Default filters, weights, and tuning rules.
