@@ -405,6 +405,10 @@ def _build_record(
         "debt_to_equity_normalized": debt_to_equity_normalized,
         "debt_to_equity": debt_to_equity_normalized,
         "data_age_days": data_age_days,
+        "price_data_age_days": data_age_days,
+        "fundamental_data_age_days": None,
+        "shares_data_age_days": None,
+        "market_cap_timestamp": latest_history_date.isoformat() if latest_history_date is not None else None,
         "halted": halted,
         "is_otc": is_otc,
         "is_etf": is_etf,
@@ -427,6 +431,9 @@ def _failed_record(ticker: str, error: str, *, as_of: Optional[date] = None) -> 
     return {
         "ticker": _normalize_ticker(ticker),
         "data_age_days": 0,
+        "price_data_age_days": None,
+        "fundamental_data_age_days": None,
+        "shares_data_age_days": None,
         "notes": f"抓取失敗：{error}",
         "raw": {
             "source": "yfinance",

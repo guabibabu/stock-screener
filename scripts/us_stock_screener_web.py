@@ -150,6 +150,8 @@ def _result_to_payload(item: Any) -> Dict[str, Any]:
         "confidence_score": item.confidence_score,
         "confidence_label": item.confidence_label,
         "confidence_multiplier": item.confidence_multiplier,
+        "data_quality_score": item.data_quality_score,
+        "data_quality_flags": item.data_quality_flags,
         "final_score": item.final_score,
         "fundamental_score": item.fundamental_score,
         "momentum_score": item.momentum_score,
@@ -160,6 +162,7 @@ def _result_to_payload(item: Any) -> Dict[str, Any]:
         "confidence_notes": item.confidence_notes,
         "penalties": item.penalties,
         "suggested_action": item.suggested_action,
+        "action_cap_reason": item.action_cap_reason,
         "company_snapshot": item.company_snapshot,
         "excluded_reason": item.excluded_reason,
         "exclusion_details": item.exclusion_details,
@@ -579,12 +582,17 @@ INDEX_HTML = r"""<!doctype html>
         if (item.confidence_score !== null && item.confidence_score !== undefined) {
           lines.push(`   信心：${item.confidence_label || 'N/A'} (${item.confidence_score})`);
         }
+        if (item.data_quality_score !== null && item.data_quality_score !== undefined) {
+          lines.push(`   資料品質：${item.data_quality_score}`);
+        }
+        if (item.action_cap_reason) lines.push(`   動作限制：${item.action_cap_reason}`);
         lines.push(`   基本面：${item.fundamental_score ?? item.factor_scores?.fundamental ?? ''}`);
         lines.push(`   動量：${item.momentum_score ?? item.factor_scores?.momentum ?? ''}`);
         lines.push(`   風險安全：${item.risk_safety_score ?? item.factor_scores?.risk_safety ?? ''}`);
         if (item.reasons && item.reasons.length) lines.push(`   理由：${item.reasons.join('；')}`);
         if (item.risk_warnings && item.risk_warnings.length) lines.push(`   風險：${item.risk_warnings.join('；')}`);
         if (item.confidence_notes && item.confidence_notes.length) lines.push(`   提醒：${item.confidence_notes.join('；')}`);
+        if (item.data_quality_flags && item.data_quality_flags.length) lines.push(`   資料品質旗標：${item.data_quality_flags.join('；')}`);
         if (item.penalties && item.penalties.length) {
           const penaltyText = item.penalties.map(p => `${p.reason} -${p.points}分`).join('；');
           lines.push(`   扣分：${item.penalty_score}（${penaltyText}）`);
@@ -640,6 +648,8 @@ INDEX_HTML = r"""<!doctype html>
         `原始分：${item.raw_score}`,
         `扣分：${item.penalty_score}`,
         `信心：${item.confidence_label || 'N/A'} (${item.confidence_score ?? 'N/A'})`,
+        `資料品質：${item.data_quality_score ?? 'N/A'}`,
+        `動作限制：${item.action_cap_reason || '無'}`,
         `最終分：${item.final_score}`,
         '',
         '入選理由：',
@@ -650,6 +660,9 @@ INDEX_HTML = r"""<!doctype html>
         '',
         '資料提醒：',
         ...((item.confidence_notes || ['無']).map(r => `- ${r}`)),
+        '',
+        '資料品質旗標：',
+        ...((item.data_quality_flags && item.data_quality_flags.length ? item.data_quality_flags : ['無']).map(r => `- ${r}`)),
         '',
         '扣分明細：',
         penalties

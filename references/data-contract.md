@@ -48,6 +48,9 @@ That watchlist is turned into a full snapshot before scoring.
 | `max_drawdown_252d` | 252-day max drawdown, in percent. |
 | `debt_to_equity` | Debt-to-equity ratio. |
 | `data_age_days` | Age of the latest snapshot in days. |
+| `price_data_age_days` | Age of price/volume data in days. Falls back to `data_age_days` if omitted. |
+| `fundamental_data_age_days` | Age of financial/fundamental data in days. Falls back to `data_age_days` if omitted. |
+| `shares_data_age_days` | Age of shares-outstanding data in days. Falls back to `data_age_days` if omitted. |
 
 ## Stop Checking Price Mode Optional Fields
 
@@ -81,6 +84,11 @@ This mode works best when the company snapshot is richer. These fields are optio
 - `beta_1y`
 - `volatility_1y`
 - `max_drawdown_1y`
+- `price_data_age_days`
+- `fundamental_data_age_days`
+- `shares_data_age_days`
+- `financial_statement_date`
+- `market_cap_timestamp`
 
 ## Hard-Filter Flags
 
@@ -118,6 +126,9 @@ The loader accepts common aliases such as:
 - `price_vs_200dma`, `above_200dma_pct`
 - `ma_200`, `sma200`, `200dma`
 - `beta_1y`, `beta`
+- `price_data_age_days`, `quote_data_age_days`, `market_data_age_days`, `data_age_days`
+- `fundamental_data_age_days`, `financial_data_age_days`, `data_age_days`
+- `shares_data_age_days`, `share_data_age_days`, `data_age_days`
 - `volatility_63d`, `realized_volatility_63d`
 - `volatility_1y`, `annualized_volatility_1y`, `volatility`
 - `max_drawdown_252d`, `drawdown_252d`

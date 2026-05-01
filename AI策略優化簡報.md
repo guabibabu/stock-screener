@@ -87,7 +87,7 @@ yfinance 會嘗試取得：
 - 股價必須 `price >= 5`
 - 市值必須 `market_cap >= 2_000_000_000`
 - 20 日均成交額必須 `avg_dollar_volume_20d >= 20_000_000`
-- 若 `data_age_days > 7`，視為資料過舊並排除
+- 若 `price_data_age_days > 7`，視為價格資料過舊並排除；舊 snapshot 可用 `data_age_days` fallback
 
 硬性剔除報告會顯示：
 
@@ -298,7 +298,7 @@ Earnings stability 使用：
 
 Stop mode 有一些額外硬性剔除，但只在欄位可取得時使用：
 
-- `data_age_days > 30`：資料超過 30 天，過舊
+- `price_data_age_days > 30`：價格資料超過 30 天，過舊
 - `operating_margin_ttm < -0.20`：營業利益率嚴重為負
 - `debt_to_equity_normalized > 10` 且不是特殊產業：負債權益比極端異常
 - `shares_growth_yoy > 0.20`：股本稀釋嚴重
@@ -345,8 +345,8 @@ Stop mode 會套用 soft penalty，總扣分上限為 25 分。
 - `eps_growth_yoy < -0.10`：扣 6
 - `max_drawdown_1y < -0.40`：扣 8
 - `volatility_1y > 0.80`：扣 6
-- `data_age_days > 7`：扣 8
-- `data_age_days > 3`：扣 4
+- `price_data_age_days > 7`：扣 8
+- `price_data_age_days > 3`：扣 4
 
 資料過舊不重複扣分，超過 7 天只扣較大的 stale-data penalty。
 
@@ -378,7 +378,7 @@ Required fields：
 - `max_drawdown_1y`
 - `volatility_1y`
 - `price_vs_200dma`
-- `data_age_days`
+- `price_data_age_days`
 
 Confidence labels：
 
@@ -442,7 +442,7 @@ Stop mode 不是每日買賣訊號，而是低頻審查。
 目前預設：
 
 - `hybrid`：不設最低分，`min_score = None`
-- `stop_checking_price`：預設最低分 `85`
+- `stop_checking_price`：不設最低分，`min_score = None`
 
 使用者可以手動指定 `min_score` 覆蓋預設值。
 
@@ -501,7 +501,7 @@ Stop mode 不是每日買賣訊號，而是低頻審查。
 4. debt_to_equity 已有 sector-aware 初步處理，但仍較粗。
 5. momentum 目前較簡化，沒有市場 regime、相對行業強度、波動調整後動量。
 6. risk model 主要用 beta、volatility、drawdown，沒有 tail risk、earnings revision、liquidity shock。
-7. Stop mode 的 min_score = 85 可能過於嚴格，導致候選過少。
+7. Stop mode 已移除預設 85 分門檻，但仍需要 top percentile / top_n 等更穩定的候選控制方式。
 8. soft penalty 門檻固定，沒有依產業分位數或市場環境動態調整。
 9. 沒有明確處理大型科技股高估值但高品質的 trade-off。
 10. 沒有 portfolio construction、position sizing、sell discipline 或 rebalance rules。
@@ -518,7 +518,7 @@ Stop mode 不是每日買賣訊號，而是低頻審查。
 4. 哪些因子應新增、刪除或降權？
 5. 哪些硬性剔除條件應調整？
 6. 哪些 soft penalty 應改成 sector-aware 或 percentile-based？
-7. Stop mode 的 `min_score = 85` 是否合理？
+7. Stop mode 是否應改用 top percentile / top_n 取代固定 `min_score`？
 8. 如何改善資料缺失時的 scoring 和 confidence？
 9. 如何讓 yfinance 資料限制下的結果更可靠？
 10. 應新增哪些測試與 mock data？

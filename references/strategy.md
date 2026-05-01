@@ -1,7 +1,7 @@
 # Strategy
 
 Purpose: explain how scores are calculated. Canonical scoring logic lives in `scripts/us_stock_screener.py`; this file is the human-readable summary.
-When you use the yfinance refresh flow, `data_age_days` and the fetch warnings should be carried into the report so stale data is obvious.
+When you use the yfinance refresh flow, `price_data_age_days`, `fundamental_data_age_days`, `shares_data_age_days`, and fetch warnings should be carried into the report so stale data is obvious. Older snapshots can still use `data_age_days` as a fallback.
 
 Default model: hybrid quantitative ranking for liquid US common stocks.
 The second mode is `stop_checking_price`, a low-frequency quality screen inspired by "Stop Checking The Price" that emphasizes business quality, growth durability, capital efficiency, cash flow quality, balance-sheet risk, drawdown control, and data completeness.
@@ -22,7 +22,8 @@ The default report is fixed:
 - Require `price >= 5`.
 - Require `market_cap >= 2_000_000_000`.
 - Require `avg_dollar_volume_20d >= 20_000_000`.
-- Prefer `data_age_days <= 7`; warn when older than 3 days.
+- Prefer `price_data_age_days <= 7`; warn when older than 3 days.
+- Treat `fundamental_data_age_days` and `shares_data_age_days` as quality warnings rather than automatic price/liquidity exclusions.
 - Exclude thinly traded or stale names before scoring.
 
 ## Composite Weights
@@ -88,8 +89,17 @@ Each result can include:
 - `company_snapshot`
 - `confidence_score`
 - `confidence_label`
+- `data_quality_score`
+- `data_quality_flags`
+- `action_cap_reason`
 - `penalties`
 - `suggested_action`
+
+### Stop-Mode Score Floor
+
+- The default `min_score` is unset.
+- Use `--min-score` only when you explicitly want a fixed score cutoff.
+- This keeps stop mode useful as a manual review list instead of hiding candidates during weak or incomplete-data market snapshots.
 
 ## Fundamental Subweights
 

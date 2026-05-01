@@ -173,6 +173,14 @@ def _get_field_value(record: StockRecord, field_name: str) -> Any:
         candidates = ["price_vs_sma50_pct"]
     elif field_name == "avg_dollar_volume_20d":
         candidates = ["avg_dollar_volume_20d"]
+    elif field_name == "price_data_age_days":
+        candidates = ["price_data_age_days", "data_age_days"]
+    elif field_name == "fundamental_data_age_days":
+        candidates = ["fundamental_data_age_days", "data_age_days"]
+    elif field_name == "shares_data_age_days":
+        candidates = ["shares_data_age_days", "data_age_days"]
+    elif field_name == "data_age_days":
+        candidates = ["data_age_days", "price_data_age_days"]
     elif field_name == "debt_to_equity":
         candidates = ["debt_to_equity_normalized", "debt_to_equity", "debt_to_equity_raw"]
     elif field_name == "debt_to_equity_normalized":
@@ -358,7 +366,7 @@ STOP_CHECKING_PRICE_REQUIRED_FIELDS = [
     "max_drawdown_1y",
     "volatility_1y",
     "price_vs_200dma",
-    "data_age_days",
+    "price_data_age_days",
 ]
 
 STOP_CHECKING_PRICE_SOFT_PENALTIES = [
@@ -409,7 +417,7 @@ STOP_CHECKING_PRICE_DEDUPE_COMPANY_GROUPS = {
 MAX_STOP_CHECKING_PRICE_PENALTY = 25
 DEFAULT_MIN_SCORE_BY_MODE = {
     "hybrid": None,
-    "stop_checking_price": 85.0,
+    "stop_checking_price": None,
 }
 REBALANCE_MONTHS = {3, 6, 9, 12}
 REBALANCE_DAY_MIN = 15
@@ -519,6 +527,11 @@ class StockRecord:
     operating_margin_3y_avg: Optional[float] = None
     eps_positive_years_5y: Optional[float] = None
     data_age_days: Optional[int] = None
+    price_data_age_days: Optional[int] = None
+    fundamental_data_age_days: Optional[int] = None
+    shares_data_age_days: Optional[int] = None
+    financial_statement_date: Optional[str] = None
+    market_cap_timestamp: Optional[str] = None
     halted: bool = False
     is_otc: bool = False
     is_etf: bool = False
@@ -575,6 +588,9 @@ class ScreenResult:
     penalty_score: Optional[float] = None
     confidence_multiplier: Optional[float] = None
     final_score: Optional[float] = None
+    data_quality_score: Optional[float] = None
+    data_quality_flags: List[str] = field(default_factory=list)
+    action_cap_reason: Optional[str] = None
 
     @property
     def is_candidate(self) -> bool:
@@ -661,6 +677,11 @@ def _canonicalize_record(payload: Dict[str, Any]) -> StockRecord:
         operating_margin_3y_avg=_coerce_float(_pick(payload, "operating_margin_3y_avg")),
         eps_positive_years_5y=_coerce_float(_pick(payload, "eps_positive_years_5y")),
         data_age_days=_coerce_int(_pick(payload, "data_age_days")),
+        price_data_age_days=_coerce_int(_pick(payload, "price_data_age_days", "quote_data_age_days", "market_data_age_days", "data_age_days")),
+        fundamental_data_age_days=_coerce_int(_pick(payload, "fundamental_data_age_days", "financial_data_age_days", "data_age_days")),
+        shares_data_age_days=_coerce_int(_pick(payload, "shares_data_age_days", "share_data_age_days", "data_age_days")),
+        financial_statement_date=_pick(payload, "financial_statement_date", "latest_financial_statement_date"),
+        market_cap_timestamp=_pick(payload, "market_cap_timestamp", "quote_timestamp", "fetched_at"),
         halted=_coerce_bool(_pick(payload, "halted")),
         is_otc=_coerce_bool(_pick(payload, "is_otc")),
         is_etf=_coerce_bool(_pick(payload, "is_etf")),
@@ -799,8 +820,9 @@ def _risk_score(record: StockRecord) -> Tuple[Optional[float], Dict[str, Optiona
 
 def _confidence_notes(record: StockRecord, factor_scores: Dict[str, Optional[float]]) -> List[str]:
     notes = []
-    if record.data_age_days is not None and record.data_age_days > 3:
-        notes.append(f"資料已 {record.data_age_days} 天未更新，判斷會比較舊")
+    price_data_age_days = _record_age_days(record, "price")
+    if price_data_age_days is not None and price_data_age_days > 3:
+        notes.append(f"價格資料已 {price_data_age_days} 天未更新，判斷會比較舊")
     if record.revenue_growth_yoy is None or record.eps_growth_yoy is None:
         missing = [field for field in ("revenue_growth_yoy", "eps_growth_yoy") if getattr(record, field) is None]
         notes.append(f"缺少 {', '.join(missing)}；成長因子會只靠剩下的欄位重算，結果比較不穩")
@@ -834,8 +856,9 @@ def _risk_warnings(record: StockRecord) -> List[str]:
         warnings.append("槓桿偏高")
     if record.pe_ratio is not None and record.pe_ratio >= 45.0:
         warnings.append("估值偏貴")
-    if record.data_age_days is not None and record.data_age_days > 7:
-        warnings.append("資料過舊")
+    price_data_age_days = _record_age_days(record, "price")
+    if price_data_age_days is not None and price_data_age_days > 7:
+        warnings.append("價格資料過舊")
     return warnings
 
 
@@ -899,7 +922,7 @@ def apply_stop_checking_price_extra_filters(record: StockRecord) -> List[str]:
 
 def apply_stop_checking_price_extra_filter_details(record: StockRecord) -> List[Dict[str, Any]]:
     details: List[Dict[str, Any]] = []
-    data_age_days = record.data_age_days
+    data_age_days = _record_age_days(record, "price")
     operating_margin_ttm = _stop_ratio_field(record, "operating_margin_ttm")
     operating_margin_raw = _stop_field(record, "operating_margin_ttm")
     debt_to_equity = _debt_to_equity_normalized(record)
@@ -910,9 +933,9 @@ def apply_stop_checking_price_extra_filter_details(record: StockRecord) -> List[
     if data_age_days is not None and data_age_days > 30:
         details.append(
             {
-                "reason": "資料超過 30 天，過舊",
+                "reason": "價格資料超過 30 天，過舊",
                 "category": "stale_data",
-                "field": "data_age_days",
+                "field": "price_data_age_days",
                 "raw_value": data_age_days,
                 "normalized_value": data_age_days,
                 "threshold": 30,
@@ -958,7 +981,7 @@ def calculate_stop_checking_price_penalties(record: StockRecord) -> Tuple[List[D
     penalties: List[Dict[str, Any]] = []
     total_points = 0.0
     stale_points = 0.0
-    data_age_days = record.data_age_days
+    data_age_days = _record_age_days(record, "price")
     debt_to_equity = _debt_to_equity_normalized(record)
     sector_aware = _is_sector_aware_debt_sector(record)
     if data_age_days is not None:
@@ -968,7 +991,7 @@ def calculate_stop_checking_price_penalties(record: StockRecord) -> Tuple[List[D
                 {
                     "reason": "資料超過 7 天",
                     "points": 8.0,
-                    "field": "data_age_days",
+                    "field": "price_data_age_days",
                     "value": data_age_days,
                 }
             )
@@ -978,7 +1001,7 @@ def calculate_stop_checking_price_penalties(record: StockRecord) -> Tuple[List[D
                 {
                     "reason": "資料超過 3 天",
                     "points": 4.0,
-                    "field": "data_age_days",
+                    "field": "price_data_age_days",
                     "value": data_age_days,
                 }
             )
@@ -1264,7 +1287,13 @@ def _stop_risk_score(record: StockRecord) -> Tuple[Optional[float], Dict[str, Op
     }
 
 
-def build_company_snapshot(record: StockRecord, confidence_score: float, confidence_label_text: str) -> Dict[str, Any]:
+def build_company_snapshot(
+    record: StockRecord,
+    confidence_score: float,
+    confidence_label_text: str,
+    data_quality_score: Optional[float] = None,
+    data_quality_flags_list: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     return {
         "ticker": record.ticker,
         "company_name": record.company_name,
@@ -1290,6 +1319,13 @@ def build_company_snapshot(record: StockRecord, confidence_score: float, confide
         "volatility_1y": record.volatility_1y if record.volatility_1y is not None else record.volatility_63d,
         "price_vs_200dma": record.price_vs_200dma if record.price_vs_200dma is not None else record.price_vs_sma200_pct,
         "data_age_days": record.data_age_days,
+        "price_data_age_days": _record_age_days(record, "price"),
+        "fundamental_data_age_days": _record_age_days(record, "fundamental"),
+        "shares_data_age_days": _record_age_days(record, "shares"),
+        "financial_statement_date": record.financial_statement_date,
+        "market_cap_timestamp": record.market_cap_timestamp,
+        "data_quality_score": data_quality_score,
+        "data_quality_flags": data_quality_flags_list or [],
         "confidence_score": confidence_score,
         "confidence_label": confidence_label_text,
     }
@@ -1377,7 +1413,7 @@ def generate_stop_checking_price_risk_warnings(record: StockRecord, confidence_s
     max_drawdown_1y = _stop_ratio_field(record, "max_drawdown_1y")
     pe_ratio = _stop_field(record, "pe_ratio")
     ps_ratio = _stop_field(record, "ps_ratio")
-    data_age_days = record.data_age_days
+    data_age_days = _record_age_days(record, "price")
     if confidence_score < 0.70:
         warnings.append("資料完整度不足，需人工複查。")
     if free_cash_flow is not None and free_cash_flow < 0:
@@ -1396,7 +1432,7 @@ def generate_stop_checking_price_risk_warnings(record: StockRecord, confidence_s
     if (pe_ratio is not None and pe_ratio > 50) or (ps_ratio is not None and ps_ratio > 20):
         warnings.append("估值偏高，需確認成長能否支撐目前價格。")
     if data_age_days is not None and data_age_days > 3:
-        warnings.append("資料不是最新，需確認資料時點。")
+        warnings.append("價格資料不是最新，需確認資料時點。")
     return warnings
 
 
@@ -1407,8 +1443,15 @@ def _stop_confidence_notes(record: StockRecord, confidence_score: float) -> List
         notes.append(f"缺少必要欄位: {', '.join(missing)}")
     if _get_field_value(record, "roic") in (None, ""):
         notes.append("ROIC 缺失，資本效率判斷主要依賴 ROE，需人工複查。")
-    if record.data_age_days is not None and record.data_age_days > 3:
-        notes.append(f"資料已 {record.data_age_days} 天未更新，判斷會比較舊")
+    price_data_age_days = _record_age_days(record, "price")
+    fundamental_data_age_days = _record_age_days(record, "fundamental")
+    shares_data_age_days = _record_age_days(record, "shares")
+    if price_data_age_days is not None and price_data_age_days > 3:
+        notes.append(f"價格資料已 {price_data_age_days} 天未更新，判斷會比較舊")
+    if fundamental_data_age_days is not None and fundamental_data_age_days > 30:
+        notes.append(f"財報資料已 {fundamental_data_age_days} 天未更新，基本面判斷需複查")
+    if shares_data_age_days is not None and shares_data_age_days > 30:
+        notes.append(f"股本資料已 {shares_data_age_days} 天未更新，稀釋判斷需複查")
     if confidence_score < 0.70:
         notes.append("資料完整度偏低，建議人工複查。")
     if record.notes:
@@ -1462,6 +1505,92 @@ def _missing_data_reason(record: StockRecord, reason: str) -> str:
     if _is_fetch_failed_record(record):
         return f"抓取失敗造成缺資料；{reason}"
     return reason
+
+
+def _record_age_days(record: StockRecord, category: str) -> Optional[int]:
+    field_name = f"{category}_data_age_days"
+    value = getattr(record, field_name, None)
+    if value is not None:
+        return value
+    return record.data_age_days
+
+
+def _record_raw_value(record: StockRecord, key: str) -> Any:
+    raw = record.raw or {}
+    nested_raw = raw.get("raw") if isinstance(raw.get("raw"), dict) else {}
+    if key in raw:
+        return raw.get(key)
+    if isinstance(nested_raw, dict):
+        return nested_raw.get(key)
+    return None
+
+
+def data_quality_flags(record: StockRecord, confidence_score: Optional[float] = None) -> List[str]:
+    flags: List[str] = []
+    if _is_fetch_failed_record(record):
+        flags.append("抓取失敗，資料缺口可能來自資料源而不是公司本身。")
+
+    price_age = _record_age_days(record, "price")
+    fundamental_age = _record_age_days(record, "fundamental")
+    shares_age = _record_age_days(record, "shares")
+    if price_age is not None and price_age > 3:
+        flags.append(f"價格資料已 {price_age} 天未更新。")
+    if fundamental_age is not None and fundamental_age > 30:
+        flags.append(f"財報資料已 {fundamental_age} 天未更新。")
+    if shares_age is not None and shares_age > 30:
+        flags.append(f"股本資料已 {shares_age} 天未更新。")
+
+    missing_critical = _stop_critical_fields_missing(record)
+    if missing_critical:
+        flags.append(f"缺少關鍵品質欄位：{', '.join(missing_critical)}。")
+    if confidence_score is not None and confidence_score < 0.70:
+        flags.append("資料完整度偏低。")
+
+    history_points = _coerce_float(_record_raw_value(record, "history_points"))
+    if history_points is not None and history_points < 252:
+        flags.append(f"價格歷史長度不足 252 筆，目前約 {int(history_points)} 筆。")
+
+    debt_raw = record.debt_to_equity_raw
+    debt_normalized = _debt_to_equity_normalized(record)
+    if debt_raw is not None and debt_normalized is not None and debt_raw != debt_normalized:
+        flags.append(f"debt_to_equity 已由 raw {debt_raw} 正規化為 {debt_normalized:.2f}。")
+
+    return flags
+
+
+def calculate_data_quality_score(record: StockRecord, confidence_score: Optional[float] = None) -> float:
+    completeness = confidence_score
+    if completeness is None:
+        completeness = calculate_confidence_score(record, STOP_CHECKING_PRICE_REQUIRED_FIELDS)
+
+    freshness_scores = [
+        score_low_better(_record_age_days(record, "price"), 3, 30),
+        score_low_better(_record_age_days(record, "fundamental"), 30, 180),
+        score_low_better(_record_age_days(record, "shares"), 30, 180),
+    ]
+    available_freshness = [score for score in freshness_scores if score is not None]
+    freshness = sum(available_freshness) / len(available_freshness) / 100.0 if available_freshness else 0.60
+
+    flags = data_quality_flags(record, confidence_score)
+    consistency = max(0.0, 1.0 - min(len(flags), 5) * 0.12)
+    source_reliability = 0.30 if _is_fetch_failed_record(record) else (0.85 if _record_raw_value(record, "source") == "yfinance" else 1.0)
+
+    score = (
+        completeness * 0.40
+        + freshness * 0.25
+        + consistency * 0.20
+        + source_reliability * 0.15
+    )
+    return max(0.0, min(1.0, score))
+
+
+def _stop_action_cap_reason(record: StockRecord, confidence_score: float) -> Optional[str]:
+    if confidence_score < 0.55:
+        return "資料完整度低於 55%，動作限制為 WATCHLIST_DATA_INSUFFICIENT。"
+    missing_critical = _stop_critical_fields_missing(record)
+    if missing_critical:
+        return f"缺少 {', '.join(missing_critical)}，Stop mode 不允許高於 WATCHLIST。"
+    return None
 
 
 def _hard_filter_detail(
@@ -1548,13 +1677,14 @@ def _hard_filter_details(record: StockRecord, config: ScreenConfig, strategy_mod
             normalized_value=dollar_volume,
             threshold=config.min_dollar_volume_20d,
         )
-    if record.data_age_days is not None and record.data_age_days > config.max_data_age_days:
+    price_data_age_days = _record_age_days(record, "price")
+    if price_data_age_days is not None and price_data_age_days > config.max_data_age_days:
         return _hard_filter_detail(
-            f"資料已 {record.data_age_days} 天未更新，超過上限 {config.max_data_age_days} 天",
+            f"價格資料已 {price_data_age_days} 天未更新，超過上限 {config.max_data_age_days} 天",
             category="stale_data",
-            field="data_age_days",
-            raw_value=record.data_age_days,
-            normalized_value=record.data_age_days,
+            field="price_data_age_days",
+            raw_value=price_data_age_days,
+            normalized_value=price_data_age_days,
             threshold=config.max_data_age_days,
         )
     if record.security_type and "preferred" in record.security_type.lower():
@@ -1649,10 +1779,13 @@ def score_record(
         risk_safety, risk_parts = _stop_risk_score(record)
         confidence_score = calculate_confidence_score(record, STOP_CHECKING_PRICE_REQUIRED_FIELDS)
         confidence_label_text = confidence_label(confidence_score)
+        data_quality_score = calculate_data_quality_score(record, confidence_score)
+        data_quality_flags_list = data_quality_flags(record, confidence_score)
         penalties, penalty_points = calculate_stop_checking_price_penalties(record)
         penalty_score = min(MAX_STOP_CHECKING_PRICE_PENALTY, penalty_points)
         confidence_multiplier = 0.75 + 0.25 * confidence_score
         critical_missing = _stop_has_critical_missing(record)
+        action_cap_reason = _stop_action_cap_reason(record, confidence_score)
         raw_score = weighted_average_available(
             {
                 "fundamental": fundamental,
@@ -1685,6 +1818,7 @@ def score_record(
             "penalty_score": _safe_round(penalty_score),
             "confidence_score": _safe_round(confidence_score, 3),
             "confidence_multiplier": _safe_round(confidence_multiplier, 3),
+            "data_quality_score": _safe_round(data_quality_score, 3),
             "final_score": _safe_round(adjusted_score),
             "critical_missing": critical_missing,
         }
@@ -1705,7 +1839,13 @@ def score_record(
                 penalties=penalties,
                 confidence_score=_safe_round(confidence_score, 3),
                 confidence_label=confidence_label_text,
-                company_snapshot=build_company_snapshot(record, confidence_score, confidence_label_text),
+                company_snapshot=build_company_snapshot(
+                    record,
+                    confidence_score,
+                    confidence_label_text,
+                    _safe_round(data_quality_score, 3),
+                    data_quality_flags_list,
+                ),
                 suggested_action="EXCLUDE",
                 hard_exclusion=True,
                 excluded_reason=excluded_reason,
@@ -1715,10 +1855,19 @@ def score_record(
                 penalty_score=_safe_round(penalty_score),
                 confidence_multiplier=_safe_round(confidence_multiplier, 3),
                 final_score=_safe_round(adjusted_score),
+                data_quality_score=_safe_round(data_quality_score, 3),
+                data_quality_flags=data_quality_flags_list,
+                action_cap_reason=action_cap_reason,
             )
         review_flag = is_rebalance_window(as_of) or force_rebalance
         total_score = _safe_round(adjusted_score)
-        company_snapshot = build_company_snapshot(record, confidence_score, confidence_label_text)
+        company_snapshot = build_company_snapshot(
+            record,
+            confidence_score,
+            confidence_label_text,
+            _safe_round(data_quality_score, 3),
+            data_quality_flags_list,
+        )
         suggested_action = assign_stop_checking_price_action(
             total_score or 0.0,
             confidence_score,
@@ -1751,6 +1900,9 @@ def score_record(
             penalty_score=_safe_round(penalty_score),
             confidence_multiplier=_safe_round(confidence_multiplier, 3),
             final_score=_safe_round(adjusted_score),
+            data_quality_score=_safe_round(data_quality_score, 3),
+            data_quality_flags=data_quality_flags_list,
+            action_cap_reason=action_cap_reason,
         )
 
     fundamental, fundamental_parts = _fundamental_score(record)
@@ -1930,6 +2082,9 @@ def screen_records(
                         "ticker": item.ticker,
                         "confidence_score": item.confidence_score,
                         "confidence_label": item.confidence_label,
+                        "data_quality_score": item.data_quality_score,
+                        "data_quality_flags": item.data_quality_flags,
+                        "action_cap_reason": item.action_cap_reason,
                         "missing_fields": _stop_critical_fields_missing(item.record),
                         "notes": item.confidence_notes,
                     }
@@ -1980,16 +2135,18 @@ def _render_markdown(report: ScreeningReport) -> str:
     lines.append("")
     lines.append("## 候選名單")
     lines.append("")
-    lines.append("| 排名 | Ticker | 總分 | 基本面 | 動量 | 風險安全 | 主要理由 | 風險警示 |")
-    lines.append("| --- | --- | ---: | ---: | ---: | ---: | --- | --- |")
+    lines.append("| 排名 | Ticker | 總分 | 資料品質 | 動作 | 基本面 | 動量 | 風險安全 | 主要理由 | 風險警示 |")
+    lines.append("| --- | --- | ---: | ---: | --- | ---: | ---: | ---: | --- | --- |")
     for index, item in enumerate(report.candidates, start=1):
         warnings = "；".join(item.risk_warnings) if item.risk_warnings else "無"
         reasons = "；".join(item.reasons)
         lines.append(
-            "| {rank} | {ticker} | {total} | {fundamental} | {momentum} | {risk} | {reasons} | {warnings} |".format(
+            "| {rank} | {ticker} | {total} | {data_quality} | {action} | {fundamental} | {momentum} | {risk} | {reasons} | {warnings} |".format(
                 rank=index,
                 ticker=item.ticker,
                 total=item.total_score if item.total_score is not None else "",
+                data_quality=item.data_quality_score if item.data_quality_score is not None else "",
+                action=item.suggested_action or "",
                 fundamental=item.factor_scores.get("fundamental") or "",
                 momentum=item.factor_scores.get("momentum") or "",
                 risk=item.factor_scores.get("risk_safety") or "",
@@ -2074,8 +2231,11 @@ def _render_json(report: ScreeningReport) -> str:
                 "penalties": item.penalties,
                 "confidence_score": item.confidence_score,
                 "confidence_label": item.confidence_label,
+                "data_quality_score": item.data_quality_score,
+                "data_quality_flags": item.data_quality_flags,
                 "company_snapshot": item.company_snapshot,
                 "suggested_action": item.suggested_action,
+                "action_cap_reason": item.action_cap_reason,
                 "hard_exclusion": item.hard_exclusion,
             }
             for item in report.candidates
@@ -2090,6 +2250,9 @@ def _render_json(report: ScreeningReport) -> str:
                 "exclusion_details": item.exclusion_details,
                 "risk_warnings": item.risk_warnings,
                 "confidence_notes": item.confidence_notes,
+                "data_quality_score": item.data_quality_score,
+                "data_quality_flags": item.data_quality_flags,
+                "action_cap_reason": item.action_cap_reason,
             }
             for item in report.hard_excluded
         ],
@@ -2143,7 +2306,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--config", help="Optional JSON config file")
     parser.add_argument("--format", choices=("markdown", "json"), default="markdown")
     parser.add_argument("--top-n", type=int, default=20)
-    parser.add_argument("--min-score", type=float, help="Optional score floor. Hybrid defaults to unset; stop_checking_price defaults to 85.")
+    parser.add_argument("--min-score", type=float, help="Optional score floor. Defaults to unset for both modes; use this only when you want a fixed cutoff.")
     parser.add_argument("--as-of", dest="as_of", help="Optional YYYY-MM-DD date")
     parser.add_argument("--strategy-mode", choices=sorted(VALID_STRATEGY_MODES), default=DEFAULT_STRATEGY_MODE)
     parser.add_argument("--force-rebalance", action="store_true")

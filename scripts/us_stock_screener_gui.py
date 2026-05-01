@@ -1232,6 +1232,8 @@ class ScreenerApp(tk.Tk):
             f"原始分：{item.raw_score}",
             f"扣分：{item.penalty_score}",
             f"信心倍率：{item.confidence_multiplier}",
+            f"資料品質：{item.data_quality_score if item.data_quality_score is not None else 'N/A'}",
+            f"動作限制：{item.action_cap_reason or '無'}",
             f"最終分：{item.final_score}",
             f"基本面：{item.factor_scores.get('fundamental')}",
             f"動量：{item.factor_scores.get('momentum')}",
@@ -1253,6 +1255,11 @@ class ScreenerApp(tk.Tk):
             lines.append("資料提醒：")
             for note in item.confidence_notes:
                 lines.append(f"- {note}")
+        if item.data_quality_flags:
+            lines.append("")
+            lines.append("資料品質旗標：")
+            for flag in item.data_quality_flags:
+                lines.append(f"- {flag}")
         self.detail_text.delete("1.0", tk.END)
         self.detail_text.insert(tk.END, "\n".join(lines))
 
@@ -1310,6 +1317,10 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
             lines.append(f"   動作：{item.suggested_action}")
         if item.confidence_score is not None:
             lines.append(f"   信心：{item.confidence_label} ({item.confidence_score})")
+        if item.data_quality_score is not None:
+            lines.append(f"   資料品質：{item.data_quality_score}")
+        if item.action_cap_reason:
+            lines.append(f"   動作限制：{item.action_cap_reason}")
         lines.append(f"   基本面：{item.factor_scores.get('fundamental')}")
         lines.append(f"   動量：{item.factor_scores.get('momentum')}")
         lines.append(f"   風險安全：{item.factor_scores.get('risk_safety')}")
@@ -1319,6 +1330,8 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
             lines.append(f"   風險：{'；'.join(item.risk_warnings)}")
         if item.confidence_notes:
             lines.append(f"   提醒：{'；'.join(item.confidence_notes)}")
+        if item.data_quality_flags:
+            lines.append(f"   資料品質旗標：{'；'.join(item.data_quality_flags)}")
         if item.penalties:
             penalty_text = "；".join(
                 f"{penalty.get('reason')} -{penalty.get('points')}分"

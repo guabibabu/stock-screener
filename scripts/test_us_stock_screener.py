@@ -304,8 +304,8 @@ class ScreenerTests(unittest.TestCase):
         user_report = build_report([dict(record)], self.config, strategy_mode="stop_checking_price", min_score=70)
         self.assertIsNone(hybrid_report.min_score)
         self.assertEqual(hybrid_report.effective_min_score_source, "none")
-        self.assertEqual(stop_report.min_score, 85.0)
-        self.assertEqual(stop_report.effective_min_score_source, "default")
+        self.assertIsNone(stop_report.min_score)
+        self.assertEqual(stop_report.effective_min_score_source, "none")
         self.assertEqual(user_report.min_score, 70.0)
         self.assertEqual(user_report.effective_min_score_source, "user")
 
@@ -467,9 +467,14 @@ class ScreenerTests(unittest.TestCase):
         self.assertIn("company_name", candidate.company_snapshot)
         self.assertIn("debt_to_equity_raw", candidate.company_snapshot)
         self.assertIn("debt_to_equity_normalized", candidate.company_snapshot)
+        self.assertIn("data_quality_score", candidate.company_snapshot)
+        self.assertIn("data_quality_flags", candidate.company_snapshot)
         self.assertIsNotNone(candidate.penalty_score)
         self.assertIsNotNone(candidate.confidence_multiplier)
         self.assertIsNotNone(candidate.final_score)
+        self.assertIsNotNone(candidate.data_quality_score)
+        self.assertIsInstance(candidate.data_quality_flags, list)
+        self.assertIsNone(candidate.action_cap_reason)
 
     def test_stop_mode_partial_confidence(self) -> None:
         records = [
@@ -718,7 +723,7 @@ class ScreenerTests(unittest.TestCase):
         stop_report = build_report([good_record], ScreenConfig(max_data_age_days=365), strategy_mode="stop_checking_price")
         self.assertEqual(len(stop_report.candidates), 0)
         self.assertEqual(len(stop_report.excluded), 1)
-        self.assertIn("資料超過 30 天，過舊", stop_report.excluded[0].excluded_reason or "")
+        self.assertIn("價格資料超過 30 天，過舊", stop_report.excluded[0].excluded_reason or "")
         self.assertEqual(
             screener.assign_stop_checking_price_action(90, 0.95, False, False),
             "WATCHLIST_HIGH_QUALITY",
@@ -731,6 +736,36 @@ class ScreenerTests(unittest.TestCase):
             screener.assign_stop_checking_price_action(90, 0.95, False, True),
             "EXCLUDE",
         )
+
+    def test_split_data_age_uses_price_age_for_hard_exclusion(self) -> None:
+        record = {
+            "ticker": "FRESH",
+            "price": 120,
+            "market_cap": 60000000000,
+            "avg_dollar_volume_20d": 150000000,
+            "revenue_growth_yoy": 0.20,
+            "eps_growth_yoy": 0.22,
+            "gross_margin_ttm": 0.55,
+            "operating_margin_ttm": 0.25,
+            "roe": 0.18,
+            "roic": 0.14,
+            "free_cash_flow": 2500000000,
+            "debt_to_equity": 0.8,
+            "shares_growth_yoy": 0.01,
+            "pe_ratio": 24,
+            "ps_ratio": 6,
+            "max_drawdown_1y": -0.16,
+            "volatility_1y": 0.20,
+            "price_vs_200dma": 0.03,
+            "price_data_age_days": 1,
+            "fundamental_data_age_days": 90,
+            "shares_data_age_days": 90,
+        }
+        report = build_report([record], self.config, strategy_mode="stop_checking_price", min_score=0)
+        self.assertEqual(len(report.candidates), 1)
+        note_text = "；".join(report.candidates[0].confidence_notes)
+        self.assertIn("財報資料已 90 天未更新", note_text)
+        self.assertIn("股本資料已 90 天未更新", note_text)
 
     def test_stop_mode_ranking_prefers_quality_over_momentum(self) -> None:
         records = [
