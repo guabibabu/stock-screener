@@ -1260,6 +1260,11 @@ class ScreenerApp(tk.Tk):
             lines.append("資料品質旗標：")
             for flag in item.data_quality_flags:
                 lines.append(f"- {flag}")
+        if item.normalization_notes:
+            lines.append("")
+            lines.append("正規化備註：")
+            for note in item.normalization_notes:
+                lines.append(f"- {note}")
         self.detail_text.delete("1.0", tk.END)
         self.detail_text.insert(tk.END, "\n".join(lines))
 
@@ -1332,6 +1337,8 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
             lines.append(f"   提醒：{'；'.join(item.confidence_notes)}")
         if item.data_quality_flags:
             lines.append(f"   資料品質旗標：{'；'.join(item.data_quality_flags)}")
+        if item.normalization_notes:
+            lines.append(f"   正規化備註：{'；'.join(item.normalization_notes)}")
         if item.penalties:
             penalty_text = "；".join(
                 f"{penalty.get('reason')} -{penalty.get('points')}分"
@@ -1348,6 +1355,7 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
             lines.append(
                 f"- {item.ticker}：{item.excluded_reason}"
                 f"｜類別 {detail.get('category', 'N/A')}"
+                f"｜嚴重度 {detail.get('severity', 'normal')}"
                 f"｜原始值 {detail.get('raw_value', 'N/A')}"
                 f"｜正規化 {detail.get('normalized_value', 'N/A')}"
                 f"｜門檻 {detail.get('threshold', 'N/A')}"
@@ -1367,7 +1375,8 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
         lines.append("")
         for item in report.missing_data_warnings:
             missing_fields = "、".join(item.get("missing_fields", [])) or "部分欄位缺失"
-            lines.append(f"- {item['ticker']}：{missing_fields}")
+            cap = f"｜動作限制：{item.get('action_cap_reason')}" if item.get("action_cap_reason") else ""
+            lines.append(f"- {item['ticker']}：{missing_fields}{cap}")
     return "\n".join(lines)
 
 

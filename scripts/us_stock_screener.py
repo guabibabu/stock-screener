@@ -590,6 +590,7 @@ class ScreenResult:
     final_score: Optional[float] = None
     data_quality_score: Optional[float] = None
     data_quality_flags: List[str] = field(default_factory=list)
+    normalization_notes: List[str] = field(default_factory=list)
     action_cap_reason: Optional[str] = None
 
     @property
@@ -920,6 +921,31 @@ def apply_stop_checking_price_extra_filters(record: StockRecord) -> List[str]:
     return [item["reason"] for item in apply_stop_checking_price_extra_filter_details(record)]
 
 
+def _borderline_exclusion_severity(
+    value: Optional[float],
+    threshold: float,
+    *,
+    direction: str,
+    tolerance: float = 0.05,
+) -> str:
+    if value is None:
+        return "normal"
+    threshold_band = abs(threshold) * tolerance
+    if threshold_band == 0:
+        threshold_band = tolerance
+    if direction == "above" and value > threshold and value <= threshold + threshold_band:
+        return "borderline"
+    if direction == "below" and value < threshold and value >= threshold - threshold_band:
+        return "borderline"
+    return "normal"
+
+
+def _with_borderline_reason(reason: str, severity: str) -> str:
+    if severity == "borderline":
+        return f"{reason}（邊界剔除，建議人工複查資料）"
+    return reason
+
+
 def apply_stop_checking_price_extra_filter_details(record: StockRecord) -> List[Dict[str, Any]]:
     details: List[Dict[str, Any]] = []
     data_age_days = _record_age_days(record, "price")
@@ -931,10 +957,13 @@ def apply_stop_checking_price_extra_filter_details(record: StockRecord) -> List[
     shares_growth_raw = _stop_field(record, "shares_growth_yoy")
     sector_aware = _is_sector_aware_debt_sector(record)
     if data_age_days is not None and data_age_days > 30:
+        severity = _borderline_exclusion_severity(float(data_age_days), 30.0, direction="above")
+        reason = _with_borderline_reason("價格資料超過 30 天，過舊", severity)
         details.append(
             {
-                "reason": "價格資料超過 30 天，過舊",
+                "reason": reason,
                 "category": "stale_data",
+                "severity": severity,
                 "field": "price_data_age_days",
                 "raw_value": data_age_days,
                 "normalized_value": data_age_days,
@@ -942,10 +971,13 @@ def apply_stop_checking_price_extra_filter_details(record: StockRecord) -> List[
             }
         )
     if operating_margin_ttm is not None and operating_margin_ttm < -0.20:
+        severity = _borderline_exclusion_severity(operating_margin_ttm, -0.20, direction="below")
+        reason = _with_borderline_reason("營業利益率嚴重為負", severity)
         details.append(
             {
-                "reason": "營業利益率嚴重為負",
+                "reason": reason,
                 "category": "profitability",
+                "severity": severity,
                 "field": "operating_margin_ttm",
                 "raw_value": operating_margin_raw,
                 "normalized_value": operating_margin_ttm,
@@ -953,10 +985,13 @@ def apply_stop_checking_price_extra_filter_details(record: StockRecord) -> List[
             }
         )
     if debt_to_equity is not None and not sector_aware and debt_to_equity > 10:
+        severity = _borderline_exclusion_severity(debt_to_equity, 10.0, direction="above")
+        reason = _with_borderline_reason("負債權益比極高", severity)
         details.append(
             {
-                "reason": "負債權益比極高",
+                "reason": reason,
                 "category": "leverage",
+                "severity": severity,
                 "field": "debt_to_equity",
                 "raw_value": debt_to_equity_raw,
                 "normalized_value": debt_to_equity,
@@ -964,10 +999,13 @@ def apply_stop_checking_price_extra_filter_details(record: StockRecord) -> List[
             }
         )
     if shares_growth_yoy is not None and shares_growth_yoy > 0.20:
+        severity = _borderline_exclusion_severity(shares_growth_yoy, 0.20, direction="above")
+        reason = _with_borderline_reason("股本稀釋嚴重", severity)
         details.append(
             {
-                "reason": "股本稀釋嚴重",
+                "reason": reason,
                 "category": "dilution",
+                "severity": severity,
                 "field": "shares_growth_yoy",
                 "raw_value": shares_growth_raw,
                 "normalized_value": shares_growth_yoy,
@@ -1293,6 +1331,7 @@ def build_company_snapshot(
     confidence_label_text: str,
     data_quality_score: Optional[float] = None,
     data_quality_flags_list: Optional[List[str]] = None,
+    normalization_notes_list: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     return {
         "ticker": record.ticker,
@@ -1326,9 +1365,31 @@ def build_company_snapshot(
         "market_cap_timestamp": record.market_cap_timestamp,
         "data_quality_score": data_quality_score,
         "data_quality_flags": data_quality_flags_list or [],
+        "normalization_notes": normalization_notes_list or [],
         "confidence_score": confidence_score,
         "confidence_label": confidence_label_text,
     }
+
+
+STOP_ACTION_RANK = {
+    "EXCLUDE": 0,
+    "WATCHLIST_DATA_INSUFFICIENT": 1,
+    "AVOID": 2,
+    "WATCHLIST": 3,
+    "WATCHLIST_HIGH_QUALITY": 4,
+    "HOLD_OR_REVIEW": 5,
+    "BUY_CANDIDATE": 6,
+}
+
+
+def _cap_stop_checking_price_action(action: str, max_action: Optional[str]) -> str:
+    if max_action is None:
+        return action
+    if action not in STOP_ACTION_RANK or max_action not in STOP_ACTION_RANK:
+        return action
+    if STOP_ACTION_RANK[action] <= STOP_ACTION_RANK[max_action]:
+        return action
+    return max_action
 
 
 def assign_stop_checking_price_action(
@@ -1337,26 +1398,32 @@ def assign_stop_checking_price_action(
     is_rebalance_window_flag: bool,
     hard_excluded: bool,
     critical_missing: bool = False,
+    max_action: Optional[str] = None,
 ) -> str:
     if hard_excluded:
         return "EXCLUDE"
     if confidence_score < 0.55:
         return "WATCHLIST_DATA_INSUFFICIENT"
-    if critical_missing:
-        return "WATCHLIST"
     if not is_rebalance_window_flag:
         if score >= 75:
-            return "WATCHLIST_HIGH_QUALITY"
+            action = "WATCHLIST_HIGH_QUALITY"
+            return _cap_stop_checking_price_action(action, "WATCHLIST" if critical_missing else max_action)
         if score >= 65:
-            return "WATCHLIST"
-        return "AVOID"
+            action = "WATCHLIST"
+            return _cap_stop_checking_price_action(action, "WATCHLIST" if critical_missing else max_action)
+        action = "AVOID"
+        return _cap_stop_checking_price_action(action, "WATCHLIST" if critical_missing else max_action)
     if score >= 82 and confidence_score >= 0.70:
-        return "BUY_CANDIDATE"
+        action = "BUY_CANDIDATE"
+        return _cap_stop_checking_price_action(action, "WATCHLIST" if critical_missing else max_action)
     if score >= 72 and confidence_score >= 0.65:
-        return "HOLD_OR_REVIEW"
+        action = "HOLD_OR_REVIEW"
+        return _cap_stop_checking_price_action(action, "WATCHLIST" if critical_missing else max_action)
     if score >= 62:
-        return "WATCHLIST"
-    return "AVOID"
+        action = "WATCHLIST"
+        return _cap_stop_checking_price_action(action, "WATCHLIST" if critical_missing else max_action)
+    action = "AVOID"
+    return _cap_stop_checking_price_action(action, "WATCHLIST" if critical_missing else max_action)
 
 
 def generate_stop_checking_price_reasons(record: StockRecord, scores: Dict[str, Optional[float]], penalties: List[Dict[str, Any]], confidence_score: float) -> List[str]:
@@ -1525,6 +1592,33 @@ def _record_raw_value(record: StockRecord, key: str) -> Any:
     return None
 
 
+def _price_history_points(record: StockRecord) -> Optional[int]:
+    value = _coerce_float(_record_raw_value(record, "history_points"))
+    if value is None:
+        return None
+    return int(value)
+
+
+def _price_history_severity(record: StockRecord) -> Optional[str]:
+    history_points = _price_history_points(record)
+    if history_points is None or history_points >= 252:
+        return None
+    if history_points < 126:
+        return "high"
+    if history_points < 200:
+        return "medium"
+    return "low"
+
+
+def normalization_notes(record: StockRecord) -> List[str]:
+    notes: List[str] = []
+    debt_raw = record.debt_to_equity_raw
+    debt_normalized = _debt_to_equity_normalized(record)
+    if debt_raw is not None and debt_normalized is not None and debt_raw != debt_normalized:
+        notes.append(f"debt_to_equity 已由 raw {debt_raw} 正規化為 {debt_normalized:.2f}。")
+    return notes
+
+
 def data_quality_flags(record: StockRecord, confidence_score: Optional[float] = None) -> List[str]:
     flags: List[str] = []
     if _is_fetch_failed_record(record):
@@ -1540,20 +1634,21 @@ def data_quality_flags(record: StockRecord, confidence_score: Optional[float] = 
     if shares_age is not None and shares_age > 30:
         flags.append(f"股本資料已 {shares_age} 天未更新。")
 
-    missing_critical = _stop_critical_fields_missing(record)
-    if missing_critical:
-        flags.append(f"缺少關鍵品質欄位：{', '.join(missing_critical)}。")
+    missing_strict = _stop_strict_action_cap_missing(record)
+    if missing_strict:
+        flags.append(f"缺少關鍵品質欄位：{', '.join(missing_strict)}。")
+    if _stop_missing_roic_with_roe(record):
+        flags.append("ROIC 缺失，資本效率以 ROE 替代，需人工複查。")
+    elif _stop_missing_roic_without_roe(record):
+        flags.append("ROIC 與 ROE 皆缺失，資本效率判斷不足。")
     if confidence_score is not None and confidence_score < 0.70:
         flags.append("資料完整度偏低。")
 
-    history_points = _coerce_float(_record_raw_value(record, "history_points"))
-    if history_points is not None and history_points < 252:
-        flags.append(f"價格歷史長度不足 252 筆，目前約 {int(history_points)} 筆。")
-
-    debt_raw = record.debt_to_equity_raw
-    debt_normalized = _debt_to_equity_normalized(record)
-    if debt_raw is not None and debt_normalized is not None and debt_raw != debt_normalized:
-        flags.append(f"debt_to_equity 已由 raw {debt_raw} 正規化為 {debt_normalized:.2f}。")
+    history_points = _price_history_points(record)
+    history_severity = _price_history_severity(record)
+    if history_points is not None and history_severity in {"high", "medium"}:
+        severity_label = "嚴重不足" if history_severity == "high" else "偏短"
+        flags.append(f"價格歷史長度{severity_label}，目前約 {history_points} 筆。")
 
     return flags
 
@@ -1587,9 +1682,11 @@ def calculate_data_quality_score(record: StockRecord, confidence_score: Optional
 def _stop_action_cap_reason(record: StockRecord, confidence_score: float) -> Optional[str]:
     if confidence_score < 0.55:
         return "資料完整度低於 55%，動作限制為 WATCHLIST_DATA_INSUFFICIENT。"
-    missing_critical = _stop_critical_fields_missing(record)
-    if missing_critical:
-        return f"缺少 {', '.join(missing_critical)}，Stop mode 不允許高於 WATCHLIST。"
+    missing_strict = _stop_strict_action_cap_missing(record)
+    if missing_strict:
+        return f"缺少 {', '.join(missing_strict)}，Stop mode 不允許高於 WATCHLIST。"
+    if _stop_missing_roic_with_roe(record):
+        return "ROIC 缺失，但有 ROE 可替代；Stop mode 不允許高於 WATCHLIST_HIGH_QUALITY。"
     return None
 
 
@@ -1712,6 +1809,32 @@ def _stop_has_critical_missing(record: StockRecord) -> bool:
     return len(_stop_critical_fields_missing(record)) > 0
 
 
+def _stop_strict_action_cap_missing(record: StockRecord) -> List[str]:
+    strict_fields = ("free_cash_flow", "shares_growth_yoy")
+    missing = [field for field in strict_fields if _get_field_value(record, field) in (None, "")]
+    if _stop_missing_roic_without_roe(record):
+        missing.append("roic")
+    return missing
+
+
+def _stop_missing_roic_with_roe(record: StockRecord) -> bool:
+    return _get_field_value(record, "roic") in (None, "") and _get_field_value(record, "roe") not in (None, "")
+
+
+def _stop_missing_roic_without_roe(record: StockRecord) -> bool:
+    return _get_field_value(record, "roic") in (None, "") and _get_field_value(record, "roe") in (None, "")
+
+
+def _stop_max_action(record: StockRecord, confidence_score: float) -> Optional[str]:
+    if confidence_score < 0.55:
+        return "WATCHLIST_DATA_INSUFFICIENT"
+    if _stop_strict_action_cap_missing(record):
+        return "WATCHLIST"
+    if _stop_missing_roic_with_roe(record):
+        return "WATCHLIST_HIGH_QUALITY"
+    return None
+
+
 def _dedupe_company_key(ticker: str) -> str:
     normalized = ticker.upper().replace("/", "-")
     return STOP_CHECKING_PRICE_DEDUPE_COMPANY_GROUPS.get(normalized, normalized)
@@ -1781,11 +1904,13 @@ def score_record(
         confidence_label_text = confidence_label(confidence_score)
         data_quality_score = calculate_data_quality_score(record, confidence_score)
         data_quality_flags_list = data_quality_flags(record, confidence_score)
+        normalization_notes_list = normalization_notes(record)
         penalties, penalty_points = calculate_stop_checking_price_penalties(record)
         penalty_score = min(MAX_STOP_CHECKING_PRICE_PENALTY, penalty_points)
         confidence_multiplier = 0.75 + 0.25 * confidence_score
-        critical_missing = _stop_has_critical_missing(record)
+        critical_missing = bool(_stop_strict_action_cap_missing(record))
         action_cap_reason = _stop_action_cap_reason(record, confidence_score)
+        max_action = _stop_max_action(record, confidence_score)
         raw_score = weighted_average_available(
             {
                 "fundamental": fundamental,
@@ -1845,6 +1970,7 @@ def score_record(
                     confidence_label_text,
                     _safe_round(data_quality_score, 3),
                     data_quality_flags_list,
+                    normalization_notes_list,
                 ),
                 suggested_action="EXCLUDE",
                 hard_exclusion=True,
@@ -1857,6 +1983,7 @@ def score_record(
                 final_score=_safe_round(adjusted_score),
                 data_quality_score=_safe_round(data_quality_score, 3),
                 data_quality_flags=data_quality_flags_list,
+                normalization_notes=normalization_notes_list,
                 action_cap_reason=action_cap_reason,
             )
         review_flag = is_rebalance_window(as_of) or force_rebalance
@@ -1867,6 +1994,7 @@ def score_record(
             confidence_label_text,
             _safe_round(data_quality_score, 3),
             data_quality_flags_list,
+            normalization_notes_list,
         )
         suggested_action = assign_stop_checking_price_action(
             total_score or 0.0,
@@ -1874,6 +2002,7 @@ def score_record(
             review_flag,
             False,
             critical_missing,
+            max_action,
         )
         return ScreenResult(
             ticker=record.ticker,
@@ -1902,6 +2031,7 @@ def score_record(
             final_score=_safe_round(adjusted_score),
             data_quality_score=_safe_round(data_quality_score, 3),
             data_quality_flags=data_quality_flags_list,
+            normalization_notes=normalization_notes_list,
             action_cap_reason=action_cap_reason,
         )
 
@@ -2158,14 +2288,15 @@ def _render_markdown(report: ScreeningReport) -> str:
         lines.append("")
         lines.append("## 硬性剔除")
         lines.append("")
-        lines.append("| Ticker | Category | Field | Raw value | Normalized value | Threshold | 原因 |")
-        lines.append("| --- | --- | --- | ---: | ---: | ---: | --- |")
+        lines.append("| Ticker | Category | Severity | Field | Raw value | Normalized value | Threshold | 原因 |")
+        lines.append("| --- | --- | --- | --- | ---: | ---: | ---: | --- |")
         for item in report.hard_excluded:
             detail = item.exclusion_details[0] if item.exclusion_details else {}
             lines.append(
-                "| {ticker} | {category} | {field} | {raw} | {normalized} | {threshold} | {reason} |".format(
+                "| {ticker} | {category} | {severity} | {field} | {raw} | {normalized} | {threshold} | {reason} |".format(
                     ticker=item.ticker,
                     category=detail.get("category", ""),
+                    severity=detail.get("severity", ""),
                     field=detail.get("field", ""),
                     raw=detail.get("raw_value", ""),
                     normalized=detail.get("normalized_value", ""),
@@ -2186,11 +2317,13 @@ def _render_markdown(report: ScreeningReport) -> str:
         lines.append("")
         lines.append("## 資料缺口提示")
         lines.append("")
-        lines.append("| Ticker | 缺少欄位 |")
-        lines.append("| --- | --- |")
+        lines.append("| Ticker | 缺少欄位 | 動作限制 | 資料品質旗標 |")
+        lines.append("| --- | --- | --- | --- |")
         for item in report.missing_data_warnings:
             missing_fields = "、".join(item.get("missing_fields", [])) or "部分欄位缺失"
-            lines.append(f"| {item['ticker']} | {missing_fields} |")
+            action_cap = item.get("action_cap_reason") or ""
+            flags = "；".join(item.get("data_quality_flags", [])) or ""
+            lines.append(f"| {item['ticker']} | {missing_fields} | {action_cap} | {flags} |")
     return "\n".join(lines)
 
 
@@ -2233,6 +2366,7 @@ def _render_json(report: ScreeningReport) -> str:
                 "confidence_label": item.confidence_label,
                 "data_quality_score": item.data_quality_score,
                 "data_quality_flags": item.data_quality_flags,
+                "normalization_notes": item.normalization_notes,
                 "company_snapshot": item.company_snapshot,
                 "suggested_action": item.suggested_action,
                 "action_cap_reason": item.action_cap_reason,
@@ -2252,6 +2386,7 @@ def _render_json(report: ScreeningReport) -> str:
                 "confidence_notes": item.confidence_notes,
                 "data_quality_score": item.data_quality_score,
                 "data_quality_flags": item.data_quality_flags,
+                "normalization_notes": item.normalization_notes,
                 "action_cap_reason": item.action_cap_reason,
             }
             for item in report.hard_excluded

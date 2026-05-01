@@ -90,6 +90,13 @@ This mode works best when the company snapshot is richer. These fields are optio
 - `financial_statement_date`
 - `market_cap_timestamp`
 
+## Stop Checking Price Output Notes
+
+- `data_quality_flags` shows user-facing data issues that affect interpretation.
+- `normalization_notes` shows debug-style field conversions, such as yfinance `debtToEquity` percentage normalization.
+- `action_cap_reason` explains why the suggested action was capped.
+- Missing `roic` with available `roe` is treated as a softer limitation than missing `free_cash_flow` or `shares_growth_yoy`.
+
 ## Hard-Filter Flags
 
 | Field | Meaning |

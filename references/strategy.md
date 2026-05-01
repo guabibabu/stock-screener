@@ -91,9 +91,19 @@ Each result can include:
 - `confidence_label`
 - `data_quality_score`
 - `data_quality_flags`
+- `normalization_notes`
 - `action_cap_reason`
 - `penalties`
 - `suggested_action`
+
+### Stop-Mode Action Caps
+
+- Missing `free_cash_flow` caps the action at `WATCHLIST`.
+- Missing `shares_growth_yoy` caps the action at `WATCHLIST`.
+- Missing `roic` with available `roe` caps the action at `WATCHLIST_HIGH_QUALITY`, because ROE can serve as a weaker capital-efficiency proxy.
+- Missing both `roic` and `roe` caps the action at `WATCHLIST`.
+- Low-severity price-history gaps such as 251/252 observations are hidden from default candidate flags; shorter histories remain visible.
+- Debt-to-equity unit conversions are reported as `normalization_notes` instead of default data-quality warnings.
 
 ### Stop-Mode Score Floor
 

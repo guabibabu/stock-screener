@@ -694,6 +694,163 @@ class ScreenerTests(unittest.TestCase):
         self.assertIn("ROE 表現良好", reason_text)
         self.assertIn("ROIC 缺失，資本效率判斷主要依賴 ROE，需人工複查。", note_text)
 
+    def test_missing_roic_with_roe_caps_at_watchlist_high_quality(self) -> None:
+        record = {
+            "ticker": "ROECAP",
+            "price": 120,
+            "market_cap": 70_000_000_000,
+            "avg_dollar_volume_20d": 150_000_000,
+            "revenue_growth_yoy": 0.20,
+            "eps_growth_yoy": 0.22,
+            "gross_margin_ttm": 0.55,
+            "operating_margin_ttm": 0.25,
+            "roe": 0.22,
+            "roic": None,
+            "free_cash_flow": 2_000_000_000,
+            "shares_growth_yoy": 0.01,
+            "pe_ratio": 26,
+            "ps_ratio": 6,
+            "max_drawdown_1y": -0.16,
+            "volatility_1y": 0.20,
+            "price_vs_200dma": 0.03,
+            "data_age_days": 2,
+        }
+        report = build_report([record], self.config, strategy_mode="stop_checking_price", min_score=0, force_rebalance=True)
+        candidate = report.candidates[0]
+        self.assertEqual(candidate.suggested_action, "WATCHLIST_HIGH_QUALITY")
+        self.assertIn("WATCHLIST_HIGH_QUALITY", candidate.action_cap_reason or "")
+
+    def test_missing_roic_without_roe_caps_at_watchlist(self) -> None:
+        record = {
+            "ticker": "NOROE",
+            "price": 120,
+            "market_cap": 70_000_000_000,
+            "avg_dollar_volume_20d": 150_000_000,
+            "revenue_growth_yoy": 0.20,
+            "eps_growth_yoy": 0.22,
+            "gross_margin_ttm": 0.55,
+            "operating_margin_ttm": 0.25,
+            "roe": None,
+            "roic": None,
+            "free_cash_flow": 2_000_000_000,
+            "shares_growth_yoy": 0.01,
+            "pe_ratio": 26,
+            "ps_ratio": 6,
+            "max_drawdown_1y": -0.16,
+            "volatility_1y": 0.20,
+            "price_vs_200dma": 0.03,
+            "data_age_days": 2,
+        }
+        report = build_report([record], self.config, strategy_mode="stop_checking_price", min_score=0, force_rebalance=True)
+        candidate = report.candidates[0]
+        self.assertEqual(candidate.suggested_action, "WATCHLIST")
+        self.assertIn("roic", candidate.action_cap_reason or "")
+
+    def test_missing_fcf_or_shares_growth_caps_at_watchlist(self) -> None:
+        base = {
+            "price": 120,
+            "market_cap": 70_000_000_000,
+            "avg_dollar_volume_20d": 150_000_000,
+            "revenue_growth_yoy": 0.20,
+            "eps_growth_yoy": 0.22,
+            "gross_margin_ttm": 0.55,
+            "operating_margin_ttm": 0.25,
+            "roe": 0.22,
+            "roic": 0.14,
+            "pe_ratio": 26,
+            "ps_ratio": 6,
+            "max_drawdown_1y": -0.16,
+            "volatility_1y": 0.20,
+            "price_vs_200dma": 0.03,
+            "data_age_days": 2,
+        }
+        records = [
+            dict(base, ticker="NOFCF", free_cash_flow=None, shares_growth_yoy=0.01),
+            dict(base, ticker="NOSHARES", free_cash_flow=2_000_000_000, shares_growth_yoy=None),
+        ]
+        report = build_report(records, self.config, strategy_mode="stop_checking_price", min_score=0, force_rebalance=True)
+        self.assertEqual({item.suggested_action for item in report.candidates}, {"WATCHLIST"})
+        self.assertTrue(all(item.action_cap_reason for item in report.candidates))
+
+    def test_price_history_251_low_severity_hidden_by_default(self) -> None:
+        record = {
+            "ticker": "HIST251",
+            "price": 120,
+            "market_cap": 70_000_000_000,
+            "avg_dollar_volume_20d": 150_000_000,
+            "revenue_growth_yoy": 0.20,
+            "eps_growth_yoy": 0.22,
+            "gross_margin_ttm": 0.55,
+            "operating_margin_ttm": 0.25,
+            "roe": 0.22,
+            "roic": 0.14,
+            "free_cash_flow": 2_000_000_000,
+            "shares_growth_yoy": 0.01,
+            "pe_ratio": 26,
+            "ps_ratio": 6,
+            "max_drawdown_1y": -0.16,
+            "volatility_1y": 0.20,
+            "price_vs_200dma": 0.03,
+            "data_age_days": 2,
+            "raw": {"history_points": 251},
+        }
+        report = build_report([record], self.config, strategy_mode="stop_checking_price", min_score=0)
+        flags = "；".join(report.candidates[0].data_quality_flags)
+        self.assertNotIn("價格歷史長度不足 252", flags)
+
+    def test_debt_to_equity_normalization_goes_to_notes(self) -> None:
+        record = {
+            "ticker": "DENORM",
+            "price": 120,
+            "market_cap": 70_000_000_000,
+            "avg_dollar_volume_20d": 150_000_000,
+            "revenue_growth_yoy": 0.20,
+            "eps_growth_yoy": 0.22,
+            "gross_margin_ttm": 0.55,
+            "operating_margin_ttm": 0.25,
+            "roe": 0.22,
+            "roic": 0.14,
+            "free_cash_flow": 2_000_000_000,
+            "shares_growth_yoy": 0.01,
+            "debt_to_equity_raw": 66.509,
+            "pe_ratio": 26,
+            "ps_ratio": 6,
+            "max_drawdown_1y": -0.16,
+            "volatility_1y": 0.20,
+            "price_vs_200dma": 0.03,
+            "data_age_days": 2,
+        }
+        report = build_report([record], self.config, strategy_mode="stop_checking_price", min_score=0)
+        candidate = report.candidates[0]
+        self.assertFalse(any("debt_to_equity 已由 raw" in flag for flag in candidate.data_quality_flags))
+        self.assertTrue(any("debt_to_equity 已由 raw" in note for note in candidate.normalization_notes))
+
+    def test_borderline_dilution_exclusion_is_marked(self) -> None:
+        record = {
+            "ticker": "DILUTE",
+            "price": 120,
+            "market_cap": 70_000_000_000,
+            "avg_dollar_volume_20d": 150_000_000,
+            "revenue_growth_yoy": 0.20,
+            "eps_growth_yoy": 0.22,
+            "gross_margin_ttm": 0.55,
+            "operating_margin_ttm": 0.25,
+            "roe": 0.22,
+            "roic": 0.14,
+            "free_cash_flow": 2_000_000_000,
+            "shares_growth_yoy": 0.2009,
+            "pe_ratio": 26,
+            "ps_ratio": 6,
+            "max_drawdown_1y": -0.16,
+            "volatility_1y": 0.20,
+            "price_vs_200dma": 0.03,
+            "data_age_days": 2,
+        }
+        report = build_report([record], self.config, strategy_mode="stop_checking_price", min_score=0)
+        detail = report.hard_excluded[0].exclusion_details[0]
+        self.assertEqual(detail.get("severity"), "borderline")
+        self.assertIn("邊界剔除", detail.get("reason", ""))
+
     def test_stop_mode_extra_filter_and_quarterly_action(self) -> None:
         good_record = {
             "ticker": "LONG",

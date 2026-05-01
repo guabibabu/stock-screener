@@ -152,6 +152,7 @@ def _result_to_payload(item: Any) -> Dict[str, Any]:
         "confidence_multiplier": item.confidence_multiplier,
         "data_quality_score": item.data_quality_score,
         "data_quality_flags": item.data_quality_flags,
+        "normalization_notes": item.normalization_notes,
         "final_score": item.final_score,
         "fundamental_score": item.fundamental_score,
         "momentum_score": item.momentum_score,
@@ -593,6 +594,7 @@ INDEX_HTML = r"""<!doctype html>
         if (item.risk_warnings && item.risk_warnings.length) lines.push(`   風險：${item.risk_warnings.join('；')}`);
         if (item.confidence_notes && item.confidence_notes.length) lines.push(`   提醒：${item.confidence_notes.join('；')}`);
         if (item.data_quality_flags && item.data_quality_flags.length) lines.push(`   資料品質旗標：${item.data_quality_flags.join('；')}`);
+        if (item.normalization_notes && item.normalization_notes.length) lines.push(`   正規化備註：${item.normalization_notes.join('；')}`);
         if (item.penalties && item.penalties.length) {
           const penaltyText = item.penalties.map(p => `${p.reason} -${p.points}分`).join('；');
           lines.push(`   扣分：${item.penalty_score}（${penaltyText}）`);
@@ -604,7 +606,7 @@ INDEX_HTML = r"""<!doctype html>
         lines.push('');
         report.hard_excluded.forEach(item => {
           const d = (item.exclusion_details || [])[0] || {};
-          lines.push(`- ${item.ticker}：${item.excluded_reason || ''}｜類別 ${d.category || 'N/A'}｜原始值 ${d.raw_value ?? 'N/A'}｜正規化 ${d.normalized_value ?? 'N/A'}｜門檻 ${d.threshold ?? 'N/A'}`);
+          lines.push(`- ${item.ticker}：${item.excluded_reason || ''}｜類別 ${d.category || 'N/A'}｜嚴重度 ${d.severity || 'normal'}｜原始值 ${d.raw_value ?? 'N/A'}｜正規化 ${d.normalized_value ?? 'N/A'}｜門檻 ${d.threshold ?? 'N/A'}`);
         });
       }
       if (report.soft_penalties && report.soft_penalties.length) {
@@ -622,7 +624,8 @@ INDEX_HTML = r"""<!doctype html>
         lines.push('');
         report.missing_data_warnings.forEach(item => {
           const fields = (item.missing_fields || []).join('、') || '部分欄位缺失';
-          lines.push(`- ${item.ticker}：${fields}`);
+          const cap = item.action_cap_reason ? `｜動作限制：${item.action_cap_reason}` : '';
+          lines.push(`- ${item.ticker}：${fields}${cap}`);
         });
       }
       return lines.join('\n');
@@ -664,6 +667,9 @@ INDEX_HTML = r"""<!doctype html>
         '資料品質旗標：',
         ...((item.data_quality_flags && item.data_quality_flags.length ? item.data_quality_flags : ['無']).map(r => `- ${r}`)),
         '',
+        '正規化備註：',
+        ...((item.normalization_notes && item.normalization_notes.length ? item.normalization_notes : ['無']).map(r => `- ${r}`)),
+        '',
         '扣分明細：',
         penalties
       ].join('\n');
@@ -672,10 +678,11 @@ INDEX_HTML = r"""<!doctype html>
     function renderExclusions(report) {
       const hard = (report.hard_excluded || []).slice(0, 80).map(item => {
         const d = (item.exclusion_details || [])[0] || {};
-        return `- ${item.ticker}：${item.excluded_reason || ''}｜類別 ${d.category || 'N/A'}｜門檻 ${d.threshold ?? 'N/A'}`;
+        return `- ${item.ticker}：${item.excluded_reason || ''}｜類別 ${d.category || 'N/A'}｜嚴重度 ${d.severity || 'normal'}｜門檻 ${d.threshold ?? 'N/A'}`;
       });
       const missing = (report.missing_data_warnings || []).slice(0, 80).map(item => {
-        return `- ${item.ticker}：${(item.missing_fields || []).join('、') || '部分欄位缺失'}`;
+        const cap = item.action_cap_reason ? `｜動作限制：${item.action_cap_reason}` : '';
+        return `- ${item.ticker}：${(item.missing_fields || []).join('、') || '部分欄位缺失'}${cap}`;
       });
       const snapshot = report.snapshot ? [
         `快照：${report.snapshot.as_of} ${report.snapshot.fetched_at}`,

@@ -399,13 +399,17 @@ final_score = score_after_penalty * confidence_multiplier
 final_score clipped to 0-100
 ```
 
-若缺少 critical fields：
+若缺少 action-critical fields：
 
 - `free_cash_flow`
-- `roic`
 - `shares_growth_yoy`
 
 則 suggested action 不允許高於 `WATCHLIST`。
+
+`roic` 目前採較軟的限制：
+
+- 缺 `roic` 但有 `roe`：最多允許到 `WATCHLIST_HIGH_QUALITY`
+- 缺 `roic` 且缺 `roe`：最多只允許到 `WATCHLIST`
 
 ## 13. Stop Mode Suggested Action
 
