@@ -469,6 +469,16 @@ Stop mode 不是每日買賣訊號，而是低頻審查。
 - `effective_min_score_source`
 - `top_n`
 - `dedupe_company`
+- `ranking_style`
+- `top_n_average_total_score`
+- `top_n_average_fundamental_score`
+- `top_n_average_momentum_score`
+- `top_n_average_risk_safety_score`
+- `high_risk_candidate_count`
+- `expensive_candidate_count`
+- `high_volatility_candidate_count`
+- `deep_drawdown_candidate_count`
+- `missing_data_candidate_count`
 
 候選股票：
 

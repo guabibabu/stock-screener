@@ -189,6 +189,16 @@ def _report_to_payload(report: Any, *, source_name: str, bundle: Any = None) -> 
         "effective_min_score_source": report.effective_min_score_source,
         "top_n": report.top_n,
         "dedupe_company": report.dedupe_company,
+        "ranking_style": report.ranking_style,
+        "top_n_average_total_score": report.top_n_average_total_score,
+        "top_n_average_fundamental_score": report.top_n_average_fundamental_score,
+        "top_n_average_momentum_score": report.top_n_average_momentum_score,
+        "top_n_average_risk_safety_score": report.top_n_average_risk_safety_score,
+        "high_risk_candidate_count": report.high_risk_candidate_count,
+        "expensive_candidate_count": report.expensive_candidate_count,
+        "high_volatility_candidate_count": report.high_volatility_candidate_count,
+        "deep_drawdown_candidate_count": report.deep_drawdown_candidate_count,
+        "missing_data_candidate_count": report.missing_data_candidate_count,
         "snapshot": None
         if bundle is None
         else {
@@ -530,7 +540,7 @@ INDEX_HTML = r"""<!doctype html>
       setMetric('mPenalty', report.soft_penalty_count);
       setMetric('mMissing', report.missing_data_count);
       setMetric('mFetchFailed', report.fetch_failed_count);
-      $('modePill').textContent = `${report.strategy_mode}｜min_score ${report.min_score ?? '未設定'}｜${report.effective_min_score_source}`;
+      $('modePill').textContent = `${report.strategy_mode}｜${report.ranking_style}｜min_score ${report.min_score ?? '未設定'}｜${report.effective_min_score_source}`;
 
       const body = $('rows');
       body.innerHTML = '';
@@ -572,6 +582,16 @@ INDEX_HTML = r"""<!doctype html>
         `retry_failed_count：${report.retry_failed_count}`,
         `fetch_failed_count：${report.fetch_failed_count}`,
         `dedupe_removed_count：${report.dedupe_removed_count}`,
+        `ranking_style：${report.ranking_style}`,
+        `top_n_average_total_score：${report.top_n_average_total_score}`,
+        `top_n_average_fundamental_score：${report.top_n_average_fundamental_score}`,
+        `top_n_average_momentum_score：${report.top_n_average_momentum_score}`,
+        `top_n_average_risk_safety_score：${report.top_n_average_risk_safety_score}`,
+        `high_risk_candidate_count：${report.high_risk_candidate_count}`,
+        `expensive_candidate_count：${report.expensive_candidate_count}`,
+        `high_volatility_candidate_count：${report.high_volatility_candidate_count}`,
+        `deep_drawdown_candidate_count：${report.deep_drawdown_candidate_count}`,
+        `missing_data_candidate_count：${report.missing_data_candidate_count}`,
         '',
         '候選名單',
         ''

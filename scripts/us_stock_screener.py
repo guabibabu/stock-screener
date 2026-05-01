@@ -619,6 +619,16 @@ class ScreeningReport:
     fetch_failed_count: int = 0
     dedupe_removed_count: int = 0
     effective_min_score_source: str = "none"
+    ranking_style: str = "balanced"
+    top_n_average_total_score: Optional[float] = None
+    top_n_average_fundamental_score: Optional[float] = None
+    top_n_average_momentum_score: Optional[float] = None
+    top_n_average_risk_safety_score: Optional[float] = None
+    high_risk_candidate_count: int = 0
+    expensive_candidate_count: int = 0
+    high_volatility_candidate_count: int = 0
+    deep_drawdown_candidate_count: int = 0
+    missing_data_candidate_count: int = 0
 
 
 def _canonicalize_record(payload: Dict[str, Any]) -> StockRecord:
@@ -861,6 +871,40 @@ def _risk_warnings(record: StockRecord) -> List[str]:
     if price_data_age_days is not None and price_data_age_days > 7:
         warnings.append("價格資料過舊")
     return warnings
+
+
+def _hybrid_missing_factor_fields(record: StockRecord) -> List[str]:
+    fields = (
+        "revenue_growth_yoy",
+        "eps_growth_yoy",
+        "gross_margin",
+        "operating_margin",
+        "return_on_equity",
+        "pe_ratio",
+        "ps_ratio",
+        "relative_strength_252d",
+        "price_vs_sma50_pct",
+        "price_vs_sma200_pct",
+        "volatility_63d",
+        "max_drawdown_252d",
+        "beta",
+    )
+    return [field_name for field_name in fields if getattr(record, field_name) is None]
+
+
+def assign_hybrid_action(record: StockRecord, total_score: Optional[float], risk_safety_score: Optional[float]) -> Tuple[str, Optional[str]]:
+    missing_fields = _hybrid_missing_factor_fields(record)
+    if missing_fields:
+        return (
+            "CANDIDATE_DATA_LIMITED",
+            f"缺少 {', '.join(missing_fields)}，僅適合作為資料待補候選。",
+        )
+    if risk_safety_score is not None and risk_safety_score < 40:
+        return (
+            "CANDIDATE_HIGH_RISK",
+            "風險安全分數過低，僅適合作為高風險候選觀察。",
+        )
+    return "CANDIDATE", None
 
 
 def _maybe_ratio(value: Optional[float]) -> Optional[float]:
@@ -1883,6 +1927,62 @@ def _dedupe_stop_checking_price_candidates(candidates: List[ScreenResult]) -> Tu
     return _dedupe_company_candidates(candidates)
 
 
+def _average_result_score(candidates: Sequence[ScreenResult], attr_name: str) -> Optional[float]:
+    values = [getattr(item, attr_name) for item in candidates if getattr(item, attr_name) is not None]
+    if not values:
+        return None
+    return _safe_round(sum(values) / len(values))
+
+
+def _diagnose_ranking_style(
+    average_fundamental: Optional[float],
+    average_momentum: Optional[float],
+    average_risk: Optional[float],
+) -> str:
+    if average_fundamental is None or average_momentum is None:
+        if average_risk is not None and average_risk >= 75:
+            return "defensive"
+        return "balanced"
+    if average_momentum - average_fundamental >= 15:
+        return "momentum_driven"
+    if average_fundamental - average_momentum >= 15:
+        return "quality_driven"
+    if average_risk is not None and average_risk >= 75:
+        return "defensive"
+    return "balanced"
+
+
+def _candidate_has_warning_keyword(item: ScreenResult, keyword: str) -> bool:
+    return any(keyword in warning for warning in item.risk_warnings)
+
+
+def _candidate_has_missing_data(item: ScreenResult) -> bool:
+    if item.action_cap_reason and "缺少" in item.action_cap_reason:
+        return True
+    if any("缺少" in note or "資料完整度" in note for note in item.confidence_notes):
+        return True
+    return False
+
+
+def build_ranking_diagnostics(candidates: Sequence[ScreenResult]) -> Dict[str, Any]:
+    average_total = _average_result_score(candidates, "total_score")
+    average_fundamental = _average_result_score(candidates, "fundamental_score")
+    average_momentum = _average_result_score(candidates, "momentum_score")
+    average_risk = _average_result_score(candidates, "risk_safety_score")
+    return {
+        "ranking_style": _diagnose_ranking_style(average_fundamental, average_momentum, average_risk),
+        "top_n_average_total_score": average_total,
+        "top_n_average_fundamental_score": average_fundamental,
+        "top_n_average_momentum_score": average_momentum,
+        "top_n_average_risk_safety_score": average_risk,
+        "high_risk_candidate_count": sum(1 for item in candidates if item.risk_safety_score is not None and item.risk_safety_score < 40),
+        "expensive_candidate_count": sum(1 for item in candidates if _candidate_has_warning_keyword(item, "估值")),
+        "high_volatility_candidate_count": sum(1 for item in candidates if _candidate_has_warning_keyword(item, "波動")),
+        "deep_drawdown_candidate_count": sum(1 for item in candidates if _candidate_has_warning_keyword(item, "回撤")),
+        "missing_data_candidate_count": sum(1 for item in candidates if _candidate_has_missing_data(item)),
+    }
+
+
 def score_record(
     record: StockRecord,
     config: ScreenConfig,
@@ -2092,6 +2192,7 @@ def score_record(
     )
     total_score = _safe_round(total)
     factor_scores["total"] = total_score
+    suggested_action, action_cap_reason = assign_hybrid_action(record, total_score, _safe_round(risk_safety))
     return ScreenResult(
         ticker=record.ticker,
         strategy_mode=strategy_mode,
@@ -2109,7 +2210,7 @@ def score_record(
         confidence_score=None,
         confidence_label=None,
         company_snapshot=None,
-        suggested_action="CANDIDATE",
+        suggested_action=suggested_action,
         hard_exclusion=False,
         excluded_reason=None,
         exclusion_reasons=[],
@@ -2117,6 +2218,7 @@ def score_record(
         penalty_score=0.0,
         confidence_multiplier=1.0,
         final_score=total_score,
+        action_cap_reason=action_cap_reason,
     )
 
 
@@ -2191,6 +2293,7 @@ def screen_records(
             if item.total_score is not None and item.total_score >= effective_min_score
         ]
     displayed_candidates = candidates[:top_n]
+    ranking_diagnostics = build_ranking_diagnostics(displayed_candidates)
     soft_penalties: List[Dict[str, Any]] = []
     missing_data_warnings: List[Dict[str, Any]] = []
     if strategy_mode == "stop_checking_price":
@@ -2239,6 +2342,16 @@ def screen_records(
         fetch_failed_count=sum(1 for item in scored if item.record is not None and _is_fetch_failed_record(item.record)),
         dedupe_removed_count=len(deduped),
         effective_min_score_source=effective_min_score_source,
+        ranking_style=ranking_diagnostics["ranking_style"],
+        top_n_average_total_score=ranking_diagnostics["top_n_average_total_score"],
+        top_n_average_fundamental_score=ranking_diagnostics["top_n_average_fundamental_score"],
+        top_n_average_momentum_score=ranking_diagnostics["top_n_average_momentum_score"],
+        top_n_average_risk_safety_score=ranking_diagnostics["top_n_average_risk_safety_score"],
+        high_risk_candidate_count=ranking_diagnostics["high_risk_candidate_count"],
+        expensive_candidate_count=ranking_diagnostics["expensive_candidate_count"],
+        high_volatility_candidate_count=ranking_diagnostics["high_volatility_candidate_count"],
+        deep_drawdown_candidate_count=ranking_diagnostics["deep_drawdown_candidate_count"],
+        missing_data_candidate_count=ranking_diagnostics["missing_data_candidate_count"],
     )
 
 
@@ -2262,6 +2375,18 @@ def _render_markdown(report: ScreeningReport) -> str:
     lines.append(f"- retry_failed_count：{report.retry_failed_count}")
     lines.append(f"- fetch_failed_count：{report.fetch_failed_count}")
     lines.append(f"- dedupe_removed_count：{report.dedupe_removed_count}")
+    lines.append(f"- ranking_style：{report.ranking_style}")
+    lines.append(f"- top_n_average_total_score：{report.top_n_average_total_score}")
+    lines.append(f"- top_n_average_fundamental_score：{report.top_n_average_fundamental_score}")
+    lines.append(f"- top_n_average_momentum_score：{report.top_n_average_momentum_score}")
+    lines.append(f"- top_n_average_risk_safety_score：{report.top_n_average_risk_safety_score}")
+    lines.append(f"- high_risk_candidate_count：{report.high_risk_candidate_count}")
+    lines.append(f"- expensive_candidate_count：{report.expensive_candidate_count}")
+    lines.append(f"- high_volatility_candidate_count：{report.high_volatility_candidate_count}")
+    lines.append(f"- deep_drawdown_candidate_count：{report.deep_drawdown_candidate_count}")
+    lines.append(f"- missing_data_candidate_count：{report.missing_data_candidate_count}")
+    if report.strategy_mode == "hybrid" and report.ranking_style == "momentum_driven":
+        lines.append("- 診斷提醒：本次 hybrid 排名偏動量導向，適合作為候選初篩，不代表低風險或長期品質排序。")
     lines.append("")
     lines.append("## 候選名單")
     lines.append("")
@@ -2344,6 +2469,16 @@ def _render_json(report: ScreeningReport) -> str:
         "retry_failed_count": report.retry_failed_count,
         "fetch_failed_count": report.fetch_failed_count,
         "dedupe_removed_count": report.dedupe_removed_count,
+        "ranking_style": report.ranking_style,
+        "top_n_average_total_score": report.top_n_average_total_score,
+        "top_n_average_fundamental_score": report.top_n_average_fundamental_score,
+        "top_n_average_momentum_score": report.top_n_average_momentum_score,
+        "top_n_average_risk_safety_score": report.top_n_average_risk_safety_score,
+        "high_risk_candidate_count": report.high_risk_candidate_count,
+        "expensive_candidate_count": report.expensive_candidate_count,
+        "high_volatility_candidate_count": report.high_volatility_candidate_count,
+        "deep_drawdown_candidate_count": report.deep_drawdown_candidate_count,
+        "missing_data_candidate_count": report.missing_data_candidate_count,
         "candidates": [
             {
                 "ticker": item.ticker,

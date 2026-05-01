@@ -15,6 +15,9 @@ The default report is fixed:
 - `入選原因`
 - `風險警示`
 - `剔除原因`
+- `ranking_style`
+- `top_n` factor averages
+- high-risk / expensive / high-volatility / drawdown / missing-data candidate counts
 
 ## Hard Filters
 
@@ -150,6 +153,27 @@ Always flag the following when present:
 - High leverage
 - Stale data
 - Missing fundamental fields
+
+## Ranking Diagnostics
+
+Reports include a lightweight diagnostic layer that does not change ranking or scores:
+
+- `ranking_style`: `momentum_driven`, `quality_driven`, `defensive`, or `balanced`
+- `top_n_average_total_score`
+- `top_n_average_fundamental_score`
+- `top_n_average_momentum_score`
+- `top_n_average_risk_safety_score`
+- `high_risk_candidate_count`
+- `expensive_candidate_count`
+- `high_volatility_candidate_count`
+- `deep_drawdown_candidate_count`
+- `missing_data_candidate_count`
+
+Hybrid candidates can use safer action labels:
+
+- `CANDIDATE`: regular candidate
+- `CANDIDATE_HIGH_RISK`: score is acceptable but risk-safety is low
+- `CANDIDATE_DATA_LIMITED`: candidate has missing factor fields
 
 ## Tuning Knobs
 

@@ -277,6 +277,54 @@ class ScreenerTests(unittest.TestCase):
         self.assertIsNone(report.min_score)
         self.assertEqual(report.effective_min_score_source, "none")
 
+    def test_hybrid_ranking_diagnostics_and_action_labels(self) -> None:
+        momentum_driven = {
+            "ticker": "MOMO1",
+            "price": 100,
+            "market_cap": 80_000_000_000,
+            "avg_dollar_volume_20d": 300_000_000,
+            "revenue_growth_yoy": 0,
+            "eps_growth_yoy": 0,
+            "gross_margin": 35,
+            "operating_margin": 22.5,
+            "return_on_equity": 15,
+            "pe_ratio": 24,
+            "ps_ratio": 6,
+            "relative_strength_252d": 100,
+            "price_vs_sma50_pct": 25,
+            "price_vs_sma200_pct": 45,
+            "beta": 1.0,
+            "volatility_63d": 20,
+            "max_drawdown_252d": 12,
+            "data_age_days": 2,
+        }
+        high_risk = dict(
+            momentum_driven,
+            ticker="RISKY",
+            revenue_growth_yoy=25,
+            eps_growth_yoy=30,
+            gross_margin=55,
+            operating_margin=35,
+            return_on_equity=25,
+            pe_ratio=50,
+            ps_ratio=6,
+            beta=2.0,
+            volatility_63d=55,
+            max_drawdown_252d=45,
+        )
+        data_limited = dict(momentum_driven, ticker="LIMITED", beta=None)
+        report = build_report([momentum_driven, high_risk, data_limited], self.config, strategy_mode="hybrid", top_n=3)
+        actions = {item.ticker: item.suggested_action for item in report.candidates}
+        self.assertEqual(report.ranking_style, "momentum_driven")
+        self.assertGreater(report.top_n_average_momentum_score or 0, report.top_n_average_fundamental_score or 0)
+        self.assertEqual(actions["RISKY"], "CANDIDATE_HIGH_RISK")
+        self.assertEqual(actions["LIMITED"], "CANDIDATE_DATA_LIMITED")
+        self.assertEqual(report.high_risk_candidate_count, 1)
+        self.assertEqual(report.expensive_candidate_count, 1)
+        self.assertEqual(report.high_volatility_candidate_count, 1)
+        self.assertEqual(report.deep_drawdown_candidate_count, 1)
+        self.assertEqual(report.missing_data_candidate_count, 1)
+
     def test_min_score_source_is_explicit(self) -> None:
         record = {
             "ticker": "QUAL",

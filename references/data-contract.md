@@ -97,6 +97,23 @@ This mode works best when the company snapshot is richer. These fields are optio
 - `action_cap_reason` explains why the suggested action was capped.
 - Missing `roic` with available `roe` is treated as a softer limitation than missing `free_cash_flow` or `shares_growth_yoy`.
 
+## Report Diagnostics
+
+All strategy modes can emit these report-level diagnostics:
+
+- `ranking_style`
+- `top_n_average_total_score`
+- `top_n_average_fundamental_score`
+- `top_n_average_momentum_score`
+- `top_n_average_risk_safety_score`
+- `high_risk_candidate_count`
+- `expensive_candidate_count`
+- `high_volatility_candidate_count`
+- `deep_drawdown_candidate_count`
+- `missing_data_candidate_count`
+
+Hybrid candidates can use `CANDIDATE_HIGH_RISK` or `CANDIDATE_DATA_LIMITED` when a name is still ranked but should not be read as a clean low-risk candidate.
+
 ## Hard-Filter Flags
 
 | Field | Meaning |

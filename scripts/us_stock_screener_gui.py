@@ -1304,7 +1304,19 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
         f"retry_failed_count：{report.retry_failed_count}",
         f"fetch_failed_count：{report.fetch_failed_count}",
         f"dedupe_removed_count：{report.dedupe_removed_count}",
+        f"ranking_style：{report.ranking_style}",
+        f"top_n_average_total_score：{report.top_n_average_total_score}",
+        f"top_n_average_fundamental_score：{report.top_n_average_fundamental_score}",
+        f"top_n_average_momentum_score：{report.top_n_average_momentum_score}",
+        f"top_n_average_risk_safety_score：{report.top_n_average_risk_safety_score}",
+        f"high_risk_candidate_count：{report.high_risk_candidate_count}",
+        f"expensive_candidate_count：{report.expensive_candidate_count}",
+        f"high_volatility_candidate_count：{report.high_volatility_candidate_count}",
+        f"deep_drawdown_candidate_count：{report.deep_drawdown_candidate_count}",
+        f"missing_data_candidate_count：{report.missing_data_candidate_count}",
     ]
+    if report.strategy_mode == "hybrid" and report.ranking_style == "momentum_driven":
+        lines.append("診斷提醒：本次 hybrid 排名偏動量導向，適合作為候選初篩，不代表低風險或長期品質排序。")
     if bundle is not None:
         lines.append(f"快照日期：{bundle.as_of}")
         lines.append(f"抓取時間：{bundle.fetched_at}")
