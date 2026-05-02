@@ -540,6 +540,27 @@ Stop mode 不是每日買賣訊號，而是低頻審查。
 12. 是否需要加入 sector-relative scoring？
 13. 是否需要加入 sell / review discipline，但不做自動下單？
 
+## 17.1 目前已準備好的 Phase 2B 工具層
+
+目前已新增 percentile / winsorization 工具，但尚未接入正式分數：
+
+- `winsorize_value`
+- `winsorize_series`
+- `percentile_rank`
+- `score_higher_is_better`
+- `score_lower_is_better`
+- `score_with_missing_policy`
+- `safe_zscore`
+
+支援 missing policy：
+
+- `ignore`
+- `neutral`
+- `zero`
+- `penalize`
+
+請注意：這些函式目前只是工具層，正式 hybrid / stop mode 排名尚未改成 percentile scoring。
+
 ## 18. 對策略優化的約束
 
 請勿建議：

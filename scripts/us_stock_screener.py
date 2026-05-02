@@ -112,6 +112,136 @@ def _safe_round(value: Optional[float], digits: int = 1) -> Optional[float]:
     return round(value, digits)
 
 
+def _valid_number(value: Any) -> Optional[float]:
+    number = _coerce_float(value)
+    if number is None or math.isnan(number) or math.isinf(number):
+        return None
+    return number
+
+
+def _valid_numbers(values: Iterable[Any]) -> List[float]:
+    return [number for value in values if (number := _valid_number(value)) is not None]
+
+
+def winsorize_value(value: Any, lower: float, upper: float) -> Optional[float]:
+    if lower > upper:
+        raise ValueError("lower must be <= upper")
+    number = _valid_number(value)
+    if number is None:
+        return None
+    return max(lower, min(upper, number))
+
+
+def _quantile(sorted_values: Sequence[float], percentile: float) -> Optional[float]:
+    if not sorted_values:
+        return None
+    if percentile < 0 or percentile > 1:
+        raise ValueError("percentile must be between 0 and 1")
+    if len(sorted_values) == 1:
+        return sorted_values[0]
+    position = (len(sorted_values) - 1) * percentile
+    lower_index = int(math.floor(position))
+    upper_index = int(math.ceil(position))
+    if lower_index == upper_index:
+        return sorted_values[lower_index]
+    lower_value = sorted_values[lower_index]
+    upper_value = sorted_values[upper_index]
+    fraction = position - lower_index
+    return lower_value + (upper_value - lower_value) * fraction
+
+
+def winsorize_series(values: Sequence[Any], lower_pct: float = 0.05, upper_pct: float = 0.95) -> List[Optional[float]]:
+    if lower_pct < 0 or upper_pct > 1 or lower_pct > upper_pct:
+        raise ValueError("percentile bounds must satisfy 0 <= lower_pct <= upper_pct <= 1")
+    valid = sorted(_valid_numbers(values))
+    if not valid:
+        return [None for _ in values]
+    lower = _quantile(valid, lower_pct)
+    upper = _quantile(valid, upper_pct)
+    if lower is None or upper is None:
+        return [None for _ in values]
+    return [winsorize_value(value, lower, upper) for value in values]
+
+
+def percentile_rank(value: Any, values: Sequence[Any]) -> Optional[float]:
+    number = _valid_number(value)
+    valid = sorted(_valid_numbers(values))
+    if number is None or not valid:
+        return None
+    if len(valid) == 1:
+        return 50.0
+    if number <= valid[0]:
+        return 0.0
+    if number >= valid[-1]:
+        return 100.0
+
+    equal_positions = [index for index, item in enumerate(valid) if item == number]
+    if equal_positions:
+        average_position = sum(equal_positions) / len(equal_positions)
+        return 100.0 * average_position / (len(valid) - 1)
+
+    upper_index = next(index for index, item in enumerate(valid) if item > number)
+    lower_index = upper_index - 1
+    lower_value = valid[lower_index]
+    upper_value = valid[upper_index]
+    if upper_value == lower_value:
+        interpolated_position = (lower_index + upper_index) / 2.0
+    else:
+        fraction = (number - lower_value) / (upper_value - lower_value)
+        interpolated_position = lower_index + fraction
+    return 100.0 * interpolated_position / (len(valid) - 1)
+
+
+def _missing_policy_score(missing_policy: str, penalize_score: float = 25.0) -> Optional[float]:
+    if missing_policy == "neutral":
+        return 50.0
+    if missing_policy == "zero":
+        return 0.0
+    if missing_policy == "ignore":
+        return None
+    if missing_policy == "penalize":
+        return float(penalize_score)
+    raise ValueError(f"Unknown missing_policy: {missing_policy}")
+
+
+def score_with_missing_policy(
+    value: Any,
+    values: Sequence[Any],
+    direction: str,
+    missing_policy: str = "ignore",
+    penalize_score: float = 25.0,
+) -> Optional[float]:
+    rank = percentile_rank(value, values)
+    if rank is None:
+        return _missing_policy_score(missing_policy, penalize_score)
+    if direction in {"higher_is_better", "higher"}:
+        return rank
+    if direction in {"lower_is_better", "lower"}:
+        return 100.0 - rank
+    raise ValueError(f"Unknown direction: {direction}")
+
+
+def score_higher_is_better(value: Any, values: Sequence[Any], missing_policy: str = "ignore") -> Optional[float]:
+    return score_with_missing_policy(value, values, "higher_is_better", missing_policy)
+
+
+def score_lower_is_better(value: Any, values: Sequence[Any], missing_policy: str = "ignore") -> Optional[float]:
+    return score_with_missing_policy(value, values, "lower_is_better", missing_policy)
+
+
+def safe_zscore(value: Any, values: Sequence[Any]) -> Optional[float]:
+    number = _valid_number(value)
+    valid = _valid_numbers(values)
+    if number is None or not valid:
+        return None
+    mean = sum(valid) / len(valid)
+    variance = sum((item - mean) ** 2 for item in valid) / len(valid)
+    std_dev = math.sqrt(variance)
+    if std_dev == 0:
+        return 0.0
+    return (number - mean) / std_dev
+
+
 def _normalize_strategy_mode(strategy_mode: str) -> str:
     if strategy_mode not in VALID_STRATEGY_MODES:
         raise ValueError(f"Unknown strategy_mode: {strategy_mode}")

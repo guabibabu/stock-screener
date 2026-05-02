@@ -175,6 +175,25 @@ Hybrid candidates can use safer action labels:
 - `CANDIDATE_HIGH_RISK`: score is acceptable but risk-safety is low
 - `CANDIDATE_DATA_LIMITED`: candidate has missing factor fields
 
+## Percentile Scoring Utilities
+
+The codebase includes reusable percentile scoring helpers for future shadow-mode and sector-aware scoring. These helpers are not wired into the live hybrid or stop-mode score yet, so current rankings and actions are unchanged.
+
+- `winsorize_value`
+- `winsorize_series`
+- `percentile_rank`
+- `score_higher_is_better`
+- `score_lower_is_better`
+- `score_with_missing_policy`
+- `safe_zscore`
+
+Supported missing-data policies:
+
+- `ignore`: return `None` so the caller can reweight remaining factors
+- `neutral`: return 50
+- `zero`: return 0
+- `penalize`: return a low configurable score, default 25
+
 ## Tuning Knobs
 
 - Tighten the universe by raising the market-cap or dollar-volume floor.

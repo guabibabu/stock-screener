@@ -63,6 +63,77 @@ class ScreenerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = ScreenConfig()
 
+    def test_winsorize_value_clips_bounds(self) -> None:
+        self.assertEqual(screener.winsorize_value(120, 0, 100), 100)
+        self.assertEqual(screener.winsorize_value(-5, 0, 100), 0)
+        self.assertEqual(screener.winsorize_value(50, 0, 100), 50)
+
+    def test_winsorize_series_clips_extreme_values(self) -> None:
+        result = screener.winsorize_series([1, 2, 3, 100], lower_pct=0.25, upper_pct=0.75)
+        self.assertEqual(result[0], 1.75)
+        self.assertEqual(result[1], 2)
+        self.assertEqual(result[2], 3)
+        self.assertEqual(result[3], 27.25)
+
+    def test_winsorize_series_ignores_none(self) -> None:
+        result = screener.winsorize_series([None, 1, 2, 100, float("nan")], lower_pct=0.0, upper_pct=0.5)
+        self.assertIsNone(result[0])
+        self.assertEqual(result[1], 1)
+        self.assertEqual(result[2], 2)
+        self.assertEqual(result[3], 2)
+        self.assertIsNone(result[4])
+
+    def test_percentile_rank_basic(self) -> None:
+        values = [10, 20, 30]
+        self.assertEqual(screener.percentile_rank(10, values), 0)
+        self.assertEqual(screener.percentile_rank(20, values), 50)
+        self.assertEqual(screener.percentile_rank(30, values), 100)
+
+    def test_percentile_rank_handles_ties(self) -> None:
+        self.assertEqual(screener.percentile_rank(20, [10, 20, 20, 30]), 50)
+
+    def test_percentile_rank_interpolates_between_values(self) -> None:
+        self.assertEqual(screener.percentile_rank(25, [10, 20, 30]), 75)
+
+    def test_percentile_rank_empty_values(self) -> None:
+        self.assertIsNone(screener.percentile_rank(10, []))
+
+    def test_percentile_rank_single_value(self) -> None:
+        self.assertEqual(screener.percentile_rank(10, [10]), 50)
+
+    def test_percentile_rank_with_nan(self) -> None:
+        self.assertIsNone(screener.percentile_rank(float("nan"), [10, 20, 30]))
+        self.assertEqual(screener.percentile_rank(20, [10, float("nan"), 20, None, 30]), 50)
+
+    def test_score_higher_is_better(self) -> None:
+        self.assertEqual(screener.score_higher_is_better(30, [10, 20, 30]), 100)
+        self.assertEqual(screener.score_higher_is_better(10, [10, 20, 30]), 0)
+
+    def test_score_lower_is_better(self) -> None:
+        self.assertEqual(screener.score_lower_is_better(10, [10, 20, 30]), 100)
+        self.assertEqual(screener.score_lower_is_better(30, [10, 20, 30]), 0)
+
+    def test_score_missing_policy_neutral(self) -> None:
+        self.assertEqual(screener.score_higher_is_better(None, [10, 20, 30], missing_policy="neutral"), 50)
+
+    def test_score_missing_policy_ignore(self) -> None:
+        self.assertIsNone(screener.score_higher_is_better(None, [10, 20, 30], missing_policy="ignore"))
+
+    def test_score_missing_policy_penalize(self) -> None:
+        self.assertEqual(
+            screener.score_with_missing_policy(None, [10, 20, 30], "higher_is_better", "penalize", penalize_score=15),
+            15,
+        )
+
+    def test_score_missing_policy_zero(self) -> None:
+        self.assertEqual(screener.score_higher_is_better(None, [10, 20, 30], missing_policy="zero"), 0)
+
+    def test_safe_zscore_handles_zero_std(self) -> None:
+        self.assertEqual(screener.safe_zscore(10, [10, 10, 10]), 0)
+
+    def test_safe_zscore_basic(self) -> None:
+        self.assertAlmostEqual(screener.safe_zscore(30, [10, 20, 30]), 1.224744871, places=6)
+
     def test_sample_csv_loads(self) -> None:
         sample = SCRIPT_DIR.parent / "references" / "sample-universe.csv"
         records = load_records(sample)
