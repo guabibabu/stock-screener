@@ -147,6 +147,12 @@ def _result_to_payload(item: Any) -> Dict[str, Any]:
         "industry": item.record.industry if item.record is not None else None,
         "strategy_mode": item.strategy_mode,
         "total_score": item.total_score,
+        "legacy_total_score": item.legacy_total_score,
+        "legacy_raw_score": item.legacy_raw_score,
+        "legacy_adjusted_score": item.legacy_adjusted_score,
+        "legacy_fundamental_score": item.legacy_fundamental_score,
+        "legacy_momentum_score": item.legacy_momentum_score,
+        "legacy_risk_safety_score": item.legacy_risk_safety_score,
         "raw_score": item.raw_score,
         "adjusted_score": item.adjusted_score,
         "penalty_score": item.penalty_score,
@@ -210,6 +216,7 @@ def _report_to_payload(report: Any, *, source_name: str, bundle: Any = None) -> 
         "high_volatility_candidate_count": report.high_volatility_candidate_count,
         "deep_drawdown_candidate_count": report.deep_drawdown_candidate_count,
         "missing_data_candidate_count": report.missing_data_candidate_count,
+        "sector_aware_official_scoring": report.sector_aware_official_scoring,
         "sector_aware_shadow_mode": report.sector_aware_shadow_mode,
         "sector_aware_preview_available_count": report.sector_aware_preview_available_count,
         "sector_aware_preview_missing_count": report.sector_aware_preview_missing_count,
@@ -579,6 +586,9 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     function formatPeerSource(item) {
+      if (item.sector_relative_peer_source === 'industry') {
+        return item.industry ? `${item.industry} industry` : 'Industry peers';
+      }
       if (item.sector_relative_peer_source === 'sector') {
         return item.sector ? `${item.sector} sector` : 'Sector peers';
       }
@@ -648,6 +658,7 @@ INDEX_HTML = r"""<!doctype html>
         `high_volatility_candidate_count：${report.high_volatility_candidate_count}`,
         `deep_drawdown_candidate_count：${report.deep_drawdown_candidate_count}`,
         `missing_data_candidate_count：${report.missing_data_candidate_count}`,
+        `sector_aware_official_scoring：${report.sector_aware_official_scoring ? '啟用' : '未啟用'}`,
         `sector_aware_shadow_mode：${report.sector_aware_shadow_mode ? '啟用' : '未啟用'}`,
         `sector_aware_preview_available_count：${report.sector_aware_preview_available_count}`,
         `sector_aware_preview_missing_count：${report.sector_aware_preview_missing_count}`,
@@ -677,6 +688,7 @@ INDEX_HTML = r"""<!doctype html>
       (report.candidates || []).forEach((item, index) => {
         lines.push(`${index + 1}. ${item.ticker}`);
         lines.push(`   總分：${item.total_score}`);
+        lines.push(`   Legacy score：${item.legacy_total_score ?? 'N/A'}`);
         lines.push(`   Sector-aware preview：${formatSectorPreview(item) || 'N/A'}`);
         lines.push(`   Peer source：${formatPeerSource(item) || 'N/A'}`);
         lines.push(`   Peer count：${item.sector_relative_peer_count ?? 'N/A'}`);
@@ -754,6 +766,7 @@ INDEX_HTML = r"""<!doctype html>
       $('detail').textContent = [
         `${item.ticker}`,
         `總分：${item.total_score}`,
+        `Legacy score：${item.legacy_total_score ?? 'N/A'}`,
         `原始分：${item.raw_score}`,
         `扣分：${item.penalty_score}`,
         `信心：${item.confidence_label || 'N/A'} (${item.confidence_score ?? 'N/A'})`,

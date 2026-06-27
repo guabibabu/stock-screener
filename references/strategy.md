@@ -194,16 +194,16 @@ Supported missing-data policies:
 - `zero`: return 0
 - `penalize`: return a low configurable score, default 25
 
-## Sector-Aware Shadow Preview
+## Sector-Aware Official Scoring
 
-Reports now include a sector-relative preview layer. This is a shadow score only:
+Phase 2D makes sector-relative percentile scoring the official factor model:
 
-- It does not change `total_score`.
-- It does not change formal ranking.
-- It does not change `suggested_action`.
-- It is used to observe how a sector-aware percentile model would compare with the current model.
+- It now changes `total_score`.
+- It can change formal ranking.
+- It can change `suggested_action` through the recalculated risk/action layer.
+- The previous fixed-threshold score is preserved in `legacy_*` fields for debug and comparison.
 
-Candidate-level preview fields:
+Candidate-level sector-aware fields:
 
 - `sector_relative_score_preview`
 - `sector_relative_rank_preview`
@@ -213,6 +213,12 @@ Candidate-level preview fields:
 - `sector_relative_notes`
 - `sector_relative_peer_source`
 - `sector_relative_peer_count`
+- `legacy_total_score`
+- `legacy_raw_score`
+- `legacy_adjusted_score`
+- `legacy_fundamental_score`
+- `legacy_momentum_score`
+- `legacy_risk_safety_score`
 
 Report-level preview fields:
 
@@ -254,17 +260,19 @@ Phase 2C.6 peer provenance diagnostics:
 - `sector_aware_missing_sector_count`: candidates with missing sector metadata.
 - `sector_aware_average_peer_count`, `sector_aware_min_peer_count`, and `sector_aware_max_peer_count`: peer-count distribution for available preview scores.
 
-Initial preview factors:
+Official sector-aware factors:
 
 - Higher is better: `revenue_growth_yoy`, `eps_growth_yoy`, `gross_margin`, `operating_margin`, `return_on_equity`, `relative_strength_252d`, `price_vs_sma200_pct`, `avg_dollar_volume_20d`
 - Lower is better: `pe_ratio`, `ps_ratio`, `volatility_63d`, `beta`, `max_drawdown_252d`
 
 Peer selection:
 
-- Use same-sector percentile when sector peer count is at least 30.
+- Use same-industry percentile when industry peer count is at least 30.
+- Otherwise use same-sector percentile when sector peer count is at least 30.
 - Otherwise fall back to the full candidate universe.
-- Reports show the peer source and peer count so users can tell whether the preview is truly sector-relative or mostly universe fallback.
-- Missing fields are ignored and reweighted inside the preview; they are reported in `sector_relative_notes`.
+- Reports show the peer source and peer count so users can tell whether the score is truly industry/sector-relative or mostly universe fallback.
+- Missing fields are ignored and reweighted inside the sector-aware score; they are reported in `sector_relative_notes`.
+- Peer values are winsorized from p5 to p95 before percentile scoring.
 
 ## Tuning Knobs
 

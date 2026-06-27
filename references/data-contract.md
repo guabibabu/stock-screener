@@ -111,6 +111,7 @@ All strategy modes can emit these report-level diagnostics:
 - `high_volatility_candidate_count`
 - `deep_drawdown_candidate_count`
 - `missing_data_candidate_count`
+- `sector_aware_official_scoring`
 - `sector_aware_shadow_mode`
 - `sector_aware_preview_available_count`
 - `sector_aware_preview_missing_count`
@@ -134,9 +135,9 @@ All strategy modes can emit these report-level diagnostics:
 
 Hybrid candidates can use `CANDIDATE_HIGH_RISK` or `CANDIDATE_DATA_LIMITED` when a name is still ranked but should not be read as a clean low-risk candidate.
 
-## Sector-Aware Preview Output
+## Sector-Aware Official Output
 
-The sector-aware preview is a shadow output. It is for diagnostics only and does not change the official ranking, score, or action.
+Sector-aware percentile scoring is now the official scoring layer. The `sector_relative_*` fields explain the official sector-aware score, and `legacy_*` fields preserve the old fixed-threshold score for comparison.
 
 Each candidate can include:
 
@@ -148,10 +149,17 @@ Each candidate can include:
 - `sector_relative_notes`
 - `sector_relative_peer_source`
 - `sector_relative_peer_count`
+- `legacy_total_score`
+- `legacy_raw_score`
+- `legacy_adjusted_score`
+- `legacy_fundamental_score`
+- `legacy_momentum_score`
+- `legacy_risk_safety_score`
 
 `sector_relative_peer_source` can be:
 
 - `sector`: same-sector peers were used.
+- `industry`: same-industry peers were used.
 - `universe_fallback`: same-sector peer count was below the threshold, so the full candidate universe was used.
 - `missing_sector`: sector metadata was missing, so the full candidate universe was used.
 - `missing_record`: source record was unavailable.

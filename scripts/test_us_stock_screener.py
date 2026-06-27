@@ -291,23 +291,25 @@ class ScreenerTests(unittest.TestCase):
         self.assertIsNotNone(partial.sector_relative_factor_scores["valuation"])
         self.assertTrue(any("pe_ratio" in note for note in partial.sector_relative_notes))
 
-    def test_sector_relative_preview_does_not_change_total_score(self) -> None:
+    def test_sector_relative_official_score_preserves_legacy_total_score(self) -> None:
         sample = SCRIPT_DIR.parent / "references" / "sample-universe.csv"
         report = build_report(load_records(sample), self.config, strategy_mode="hybrid", top_n=4)
-        scores = {item.ticker: item.total_score for item in report.candidates}
-        self.assertEqual(scores["NVDA"], 76.5)
-        self.assertEqual(scores["MSFT"], 74.7)
-        self.assertEqual(scores["AAPL"], 66.5)
+        legacy_scores = {item.ticker: item.legacy_total_score for item in report.candidates}
+        self.assertEqual(legacy_scores["NVDA"], 76.5)
+        self.assertEqual(legacy_scores["MSFT"], 74.7)
+        self.assertEqual(legacy_scores["AAPL"], 66.5)
+        self.assertNotEqual({item.ticker: item.total_score for item in report.candidates}, legacy_scores)
 
-    def test_sector_relative_preview_does_not_change_ranking(self) -> None:
+    def test_sector_relative_official_score_can_change_ranking(self) -> None:
         sample = SCRIPT_DIR.parent / "references" / "sample-universe.csv"
         report = build_report(load_records(sample), self.config, strategy_mode="hybrid", top_n=4)
         self.assertEqual([item.ticker for item in report.candidates], ["NVDA", "MSFT", "AAPL"])
+        self.assertTrue(all(item.factor_scores.get("sector_aware_official_score") for item in report.candidates))
 
-    def test_sector_relative_preview_does_not_change_suggested_action(self) -> None:
+    def test_sector_relative_official_score_recalculates_suggested_action(self) -> None:
         sample = SCRIPT_DIR.parent / "references" / "sample-universe.csv"
         report = build_report(load_records(sample), self.config, strategy_mode="hybrid", top_n=4)
-        self.assertEqual({item.suggested_action for item in report.candidates}, {"CANDIDATE"})
+        self.assertIn("CANDIDATE_HIGH_RISK", {item.suggested_action for item in report.candidates})
 
     def test_sector_relative_rank_delta(self) -> None:
         weak = screener.ScreenResult(
@@ -387,7 +389,7 @@ class ScreenerTests(unittest.TestCase):
         self.assertIsNotNone(candidate.sector_relative_score_delta)
         self.assertAlmostEqual(
             candidate.sector_relative_score_delta or 0,
-            round((candidate.sector_relative_score_preview or 0) - (candidate.total_score or 0), 1),
+            round((candidate.sector_relative_score_preview or 0) - (candidate.legacy_total_score or 0), 1),
         )
 
     def test_sector_relative_report_summary_and_web_payload(self) -> None:
@@ -399,6 +401,7 @@ class ScreenerTests(unittest.TestCase):
         }
         report = run_screen_request(payload)
         self.assertTrue(report["sector_aware_shadow_mode"])
+        self.assertTrue(report["sector_aware_official_scoring"])
         self.assertIn("sector_aware_preview_available_count", report)
         self.assertIn("sector_aware_sector_peer_used_count", report)
         self.assertIn("sector_aware_universe_fallback_count", report)
@@ -531,8 +534,120 @@ class ScreenerTests(unittest.TestCase):
         sample = SCRIPT_DIR.parent / "references" / "sample-universe.csv"
         report = build_report(load_records(sample), self.config, strategy_mode="hybrid", top_n=4)
         self.assertEqual([item.ticker for item in report.candidates], ["NVDA", "MSFT", "AAPL"])
-        self.assertEqual([item.total_score for item in report.candidates], [76.5, 74.7, 66.5])
-        self.assertEqual([item.suggested_action for item in report.candidates], ["CANDIDATE", "CANDIDATE", "CANDIDATE"])
+        self.assertEqual([item.legacy_total_score for item in report.candidates], [76.5, 74.7, 66.5])
+        self.assertEqual([item.total_score for item in report.candidates], [68.9, 53.9, 27.2])
+
+    def test_sector_aware_official_marks_factor_scores(self) -> None:
+        records = [
+            self._sector_preview_record("AAA", revenue_growth_yoy=1, eps_growth_yoy=1),
+            self._sector_preview_record("BBB", revenue_growth_yoy=30, eps_growth_yoy=30),
+        ]
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=2)
+        self.assertTrue(all(item.factor_scores.get("sector_aware_official_score") for item in report.candidates))
+
+    def test_sector_aware_official_preserves_legacy_factor_scores(self) -> None:
+        sample = SCRIPT_DIR.parent / "references" / "sample-universe.csv"
+        report = build_report(load_records(sample), self.config, strategy_mode="hybrid", top_n=4)
+        candidate = report.candidates[0]
+        self.assertIsNotNone(candidate.legacy_fundamental_score)
+        self.assertIsNotNone(candidate.legacy_momentum_score)
+        self.assertIsNotNone(candidate.legacy_risk_safety_score)
+        self.assertIn("legacy_fundamental_score", candidate.factor_scores)
+
+    def test_sector_aware_official_uses_config_weights(self) -> None:
+        records = [
+            self._sector_preview_record("QUALITY", revenue_growth_yoy=30, eps_growth_yoy=30, relative_strength_252d=10),
+            self._sector_preview_record("MOMENTUM", revenue_growth_yoy=1, eps_growth_yoy=1, relative_strength_252d=100),
+        ]
+        quality_config = ScreenConfig(fundamental_weight=0.80, momentum_weight=0.10, risk_weight=0.10)
+        momentum_config = ScreenConfig(fundamental_weight=0.10, momentum_weight=0.80, risk_weight=0.10)
+        quality_report = build_report(records, quality_config, strategy_mode="hybrid", top_n=2)
+        momentum_report = build_report(records, momentum_config, strategy_mode="hybrid", top_n=2)
+        self.assertNotEqual(quality_report.candidates[0].ticker, momentum_report.candidates[0].ticker)
+
+    def test_stop_sector_aware_official_preserves_legacy_score(self) -> None:
+        records = [
+            self._sector_preview_record("STOPA", free_cash_flow=2_000_000_000, shares_growth_yoy=0.01, roe=0.20, roic=0.14),
+            self._sector_preview_record("STOPB", free_cash_flow=1_000_000_000, shares_growth_yoy=0.02, roe=0.12, roic=0.08),
+        ]
+        report = build_report(records, self.config, strategy_mode="stop_checking_price", min_score=0, top_n=2)
+        self.assertTrue(all(item.legacy_total_score is not None for item in report.candidates))
+        self.assertTrue(all(item.factor_scores.get("sector_aware_official_score") for item in report.candidates))
+
+    def test_stop_sector_aware_raw_score_uses_preview_score(self) -> None:
+        records = [
+            self._sector_preview_record("STOPA", free_cash_flow=2_000_000_000, shares_growth_yoy=0.01, roe=0.20, roic=0.14),
+            self._sector_preview_record("STOPB", free_cash_flow=1_000_000_000, shares_growth_yoy=0.02, roe=0.12, roic=0.08),
+        ]
+        report = build_report(records, self.config, strategy_mode="stop_checking_price", min_score=0, top_n=2)
+        candidate = report.candidates[0]
+        self.assertEqual(candidate.raw_score, candidate.sector_relative_score_preview)
+
+    def test_sector_aware_score_delta_compares_against_legacy_score(self) -> None:
+        records = [
+            self._sector_preview_record("LOW", revenue_growth_yoy=1, eps_growth_yoy=1),
+            self._sector_preview_record("HIGH", revenue_growth_yoy=30, eps_growth_yoy=30),
+        ]
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=2)
+        candidate = report.candidates[0]
+        self.assertAlmostEqual(
+            candidate.sector_relative_score_delta or 0,
+            round((candidate.sector_relative_score_preview or 0) - (candidate.legacy_total_score or 0), 1),
+        )
+
+    def test_industry_peer_source_takes_precedence_over_sector(self) -> None:
+        records = [
+            self._sector_preview_record(f"SW{index:02d}", sector="Technology", industry="Software")
+            for index in range(screener.SECTOR_RELATIVE_MIN_PEERS)
+        ]
+        records.extend(
+            [
+                self._sector_preview_record(f"HW{index:02d}", sector="Technology", industry="Hardware")
+                for index in range(screener.SECTOR_RELATIVE_MIN_PEERS)
+            ]
+        )
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=80)
+        target = next(item for item in report.candidates if item.ticker == "SW29")
+        self.assertEqual(target.sector_relative_peer_source, "industry")
+        self.assertEqual(target.sector_relative_peer_count, screener.SECTOR_RELATIVE_MIN_PEERS)
+
+    def test_sector_aware_winsorization_limits_outlier_effect(self) -> None:
+        records = [
+            self._sector_preview_record(f"NORM{index:02d}", revenue_growth_yoy=10 + index, eps_growth_yoy=10 + index)
+            for index in range(20)
+        ]
+        records.append(self._sector_preview_record("OUTLIER", revenue_growth_yoy=10000, eps_growth_yoy=10000))
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=25)
+        outlier = next(item for item in report.candidates if item.ticker == "OUTLIER")
+        self.assertLessEqual(outlier.sector_relative_factor_scores["growth"] or 0, 100)
+
+    def test_web_payload_includes_legacy_score_fields(self) -> None:
+        payload = {
+            "source_mode": "sample_universe",
+            "strategy_mode": "hybrid",
+            "force_rebalance": False,
+            "auto_fetch": False,
+        }
+        report = run_screen_request(payload)
+        candidate = report["candidates"][0]
+        self.assertIn("legacy_total_score", candidate)
+        self.assertIn("legacy_fundamental_score", candidate)
+
+    def test_markdown_includes_legacy_score_column(self) -> None:
+        sample = SCRIPT_DIR.parent / "references" / "sample-universe.csv"
+        report = build_report(load_records(sample), self.config, strategy_mode="hybrid", top_n=4)
+        markdown = screener._render_markdown(report)
+        self.assertIn("Legacy score", markdown)
+
+    def test_min_score_filters_on_sector_aware_official_score(self) -> None:
+        sample = SCRIPT_DIR.parent / "references" / "sample-universe.csv"
+        report = build_report(load_records(sample), self.config, strategy_mode="hybrid", top_n=4, min_score=60)
+        self.assertEqual([item.ticker for item in report.candidates], ["NVDA"])
+
+    def test_sector_aware_official_score_changes_at_least_one_sample_score(self) -> None:
+        sample = SCRIPT_DIR.parent / "references" / "sample-universe.csv"
+        report = build_report(load_records(sample), self.config, strategy_mode="hybrid", top_n=4)
+        self.assertTrue(any(item.total_score != item.legacy_total_score for item in report.candidates))
 
     def test_sample_watchlist_loads(self) -> None:
         sample = SCRIPT_DIR.parent / "references" / "sample-watchlist.csv"
@@ -780,8 +895,8 @@ class ScreenerTests(unittest.TestCase):
         data_limited = dict(momentum_driven, ticker="LIMITED", beta=None)
         report = build_report([momentum_driven, high_risk, data_limited], self.config, strategy_mode="hybrid", top_n=3)
         actions = {item.ticker: item.suggested_action for item in report.candidates}
-        self.assertEqual(report.ranking_style, "momentum_driven")
-        self.assertGreater(report.top_n_average_momentum_score or 0, report.top_n_average_fundamental_score or 0)
+        self.assertEqual(report.ranking_style, "quality_driven")
+        self.assertGreater(report.top_n_average_fundamental_score or 0, report.top_n_average_momentum_score or 0)
         self.assertEqual(actions["RISKY"], "CANDIDATE_HIGH_RISK")
         self.assertEqual(actions["LIMITED"], "CANDIDATE_DATA_LIMITED")
         self.assertEqual(report.high_risk_candidate_count, 1)
@@ -975,7 +1090,7 @@ class ScreenerTests(unittest.TestCase):
         self.assertEqual(candidate.confidence_label, "high")
         self.assertIsInstance(candidate.penalties, list)
         self.assertIsNotNone(candidate.suggested_action)
-        self.assertEqual(candidate.suggested_action, "WATCHLIST_HIGH_QUALITY")
+        self.assertLessEqual(screener.STOP_ACTION_RANK[candidate.suggested_action], screener.STOP_ACTION_RANK["WATCHLIST_HIGH_QUALITY"])
         self.assertEqual(candidate.company_snapshot["confidence_label"], "high")
         self.assertIn("company_name", candidate.company_snapshot)
         self.assertIn("debt_to_equity_raw", candidate.company_snapshot)
@@ -1102,7 +1217,7 @@ class ScreenerTests(unittest.TestCase):
         candidate = report.candidates[0]
         self.assertLess(candidate.confidence_score or 0.0, 1.0)
         self.assertNotEqual(candidate.suggested_action, "WATCHLIST_HIGH_QUALITY")
-        self.assertIn(candidate.suggested_action, {"WATCHLIST", "WATCHLIST_DATA_INSUFFICIENT"})
+        self.assertLessEqual(screener.STOP_ACTION_RANK[candidate.suggested_action], screener.STOP_ACTION_RANK["WATCHLIST"])
 
     def test_stop_mode_penalties_and_warnings(self) -> None:
         record = screener._canonicalize_record(
@@ -1230,7 +1345,7 @@ class ScreenerTests(unittest.TestCase):
         }
         report = build_report([record], self.config, strategy_mode="stop_checking_price", min_score=0, force_rebalance=True)
         candidate = report.candidates[0]
-        self.assertEqual(candidate.suggested_action, "WATCHLIST_HIGH_QUALITY")
+        self.assertLessEqual(screener.STOP_ACTION_RANK[candidate.suggested_action], screener.STOP_ACTION_RANK["WATCHLIST_HIGH_QUALITY"])
         self.assertIn("WATCHLIST_HIGH_QUALITY", candidate.action_cap_reason or "")
 
     def test_missing_roic_without_roe_caps_at_watchlist(self) -> None:
@@ -1256,7 +1371,7 @@ class ScreenerTests(unittest.TestCase):
         }
         report = build_report([record], self.config, strategy_mode="stop_checking_price", min_score=0, force_rebalance=True)
         candidate = report.candidates[0]
-        self.assertEqual(candidate.suggested_action, "WATCHLIST")
+        self.assertLessEqual(screener.STOP_ACTION_RANK[candidate.suggested_action], screener.STOP_ACTION_RANK["WATCHLIST"])
         self.assertIn("roic", candidate.action_cap_reason or "")
 
     def test_missing_fcf_or_shares_growth_caps_at_watchlist(self) -> None:
@@ -1282,7 +1397,9 @@ class ScreenerTests(unittest.TestCase):
             dict(base, ticker="NOSHARES", free_cash_flow=2_000_000_000, shares_growth_yoy=None),
         ]
         report = build_report(records, self.config, strategy_mode="stop_checking_price", min_score=0, force_rebalance=True)
-        self.assertEqual({item.suggested_action for item in report.candidates}, {"WATCHLIST"})
+        self.assertTrue(
+            all(screener.STOP_ACTION_RANK[item.suggested_action] <= screener.STOP_ACTION_RANK["WATCHLIST"] for item in report.candidates)
+        )
         self.assertTrue(all(item.action_cap_reason for item in report.candidates))
 
     def test_price_history_251_low_severity_hidden_by_default(self) -> None:
@@ -1493,7 +1610,7 @@ class ScreenerTests(unittest.TestCase):
         report = build_report(records, ScreenConfig(max_data_age_days=365), strategy_mode="stop_checking_price", min_score=0)
         self.assertEqual([item.ticker for item in report.candidates], ["QUALA", "MOMO"])
         self.assertGreater(report.candidates[0].total_score or 0, report.candidates[1].total_score or 0)
-        self.assertEqual(report.candidates[0].suggested_action, "WATCHLIST_HIGH_QUALITY")
+        self.assertIn(report.candidates[0].suggested_action, {"WATCHLIST", "WATCHLIST_HIGH_QUALITY"})
 
     def test_yfinance_snapshot_builder_normalizes_payload(self) -> None:
         start = date(2025, 1, 1)

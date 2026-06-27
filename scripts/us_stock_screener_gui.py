@@ -1238,6 +1238,7 @@ class ScreenerApp(tk.Tk):
         lines = [
             f"{item.ticker}",
             f"總分：{item.total_score}",
+            f"Legacy score：{item.legacy_total_score if item.legacy_total_score is not None else 'N/A'}",
             f"原始分：{item.raw_score}",
             f"扣分：{item.penalty_score}",
             f"信心倍率：{item.confidence_multiplier}",
@@ -1336,6 +1337,7 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
         f"high_volatility_candidate_count：{report.high_volatility_candidate_count}",
         f"deep_drawdown_candidate_count：{report.deep_drawdown_candidate_count}",
         f"missing_data_candidate_count：{report.missing_data_candidate_count}",
+        f"sector_aware_official_scoring：{'啟用' if report.sector_aware_official_scoring else '未啟用'}",
         f"sector_aware_shadow_mode：{'啟用' if report.sector_aware_shadow_mode else '未啟用'}",
         f"sector_aware_preview_available_count：{report.sector_aware_preview_available_count}",
         f"sector_aware_preview_missing_count：{report.sector_aware_preview_missing_count}",
@@ -1385,6 +1387,7 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
     for index, item in enumerate(report.candidates, start=1):
         lines.append(f"{index}. {item.ticker}")
         lines.append(f"   總分：{item.total_score}")
+        lines.append(f"   Legacy score：{item.legacy_total_score if item.legacy_total_score is not None else 'N/A'}")
         lines.append(f"   Sector-aware preview：{_format_sector_relative_preview(item) or 'N/A'}")
         lines.append(f"   Peer source：{_format_sector_relative_peer_source(item) or 'N/A'}")
         lines.append(f"   Peer count：{item.sector_relative_peer_count if item.sector_relative_peer_count is not None else 'N/A'}")

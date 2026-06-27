@@ -559,11 +559,11 @@ Stop mode 不是每日買賣訊號，而是低頻審查。
 - `zero`
 - `penalize`
 
-請注意：這些函式目前只是工具層，正式 hybrid / stop mode 排名尚未改成 percentile scoring。
+請注意：Phase 2D 之後，sector-aware percentile scoring 已接入正式 hybrid / stop mode 排名；舊模型分數保留在 `legacy_*` 欄位供比較。
 
-## 17.2 目前已完成的 Phase 2C sector-aware shadow mode
+## 17.2 目前已完成的 Phase 2D sector-aware official scoring
 
-目前已新增 sector-aware preview，但尚未接入正式分數：
+目前已新增 sector-aware official scoring，並保留 comparison/debug 欄位：
 
 - `sector_relative_score_preview`
 - `sector_relative_rank_preview`
@@ -573,6 +573,12 @@ Stop mode 不是每日買賣訊號，而是低頻審查。
 - `sector_relative_notes`
 - `sector_relative_peer_source`
 - `sector_relative_peer_count`
+- `legacy_total_score`
+- `legacy_raw_score`
+- `legacy_adjusted_score`
+- `legacy_fundamental_score`
+- `legacy_momentum_score`
+- `legacy_risk_safety_score`
 - `sector_aware_preview_available_count`
 - `sector_aware_preview_missing_count`
 - `sector_aware_preview_coverage`
@@ -593,21 +599,24 @@ Stop mode 不是每日買賣訊號，而是低頻審查。
 - `sector_aware_min_peer_count`
 - `sector_aware_max_peer_count`
 
-這一層只用來觀察：
+這一層現在正式用來計算：
 
 ```text
-如果用同產業 percentile scoring，候選股分數與排名會怎麼變？
+用 industry / sector / universe percentile scoring 後的正式候選分數與排名
 ```
 
-目前不會改變：
+目前會改變：
 
 - 正式 `total_score`
 - 正式候選排序
 - `suggested_action`
+
+仍不改變：
+
 - hard filters
 - soft penalties
 
-初版 preview 使用同 sector peers；若同產業候選數少於 30，fallback 到全候選 universe。缺欄位不直接扣分，只在 preview 內忽略並寫入 notes。
+正式 scoring 使用 industry peers；若 industry 不足 30，改用 sector peers；若 sector 仍不足 30，fallback 到全候選 universe。缺欄位不直接扣分，只在 sector-aware score 內忽略並寫入 notes。peer values 使用 p5-p95 winsorization。
 
 Phase 2C.5 又補上 preview diagnostics：
 
