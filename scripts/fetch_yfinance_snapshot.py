@@ -76,6 +76,13 @@ def _pick(data: Dict[str, Any], *keys: str) -> Any:
     return None
 
 
+def _clean_metadata_text(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def _safe_percent(value: Any) -> Optional[float]:
     number = _coerce_float(value)
     if number is None:
@@ -358,6 +365,10 @@ def _build_record(
     quote_type = str(_pick(info, "quoteType", "type") or "").strip().upper()
     exchange = _pick(info, "fullExchangeName", "exchange")
     exchange_text = str(exchange or "").strip()
+    sector = _clean_metadata_text(_pick(info, "sector"))
+    industry = _clean_metadata_text(_pick(info, "industry"))
+    metadata_fetch_failed = bool(info.get("__metadata_fetch_failed__"))
+    metadata_missing = not metadata_fetch_failed and (sector is None or industry is None)
     is_otc = "OTC" in exchange_text.upper()
     is_etf = quote_type == "ETF"
     is_adr = "ADR" in quote_type
@@ -381,6 +392,8 @@ def _build_record(
     shares_growth_yoy = _shares_growth_yoy_from_history(shares)
     record = {
         "ticker": _normalize_ticker(ticker),
+        "sector": sector,
+        "industry": industry,
         "price": price,
         "market_cap": market_cap,
         "avg_dollar_volume_20d": avg_dollar_volume_20d,
@@ -421,6 +434,8 @@ def _build_record(
             "history_points": len(history_rows),
             "latest_history_date": latest_history_date.isoformat() if latest_history_date is not None else None,
             "latest_close": latest_close,
+            "metadata_fetch_failed": metadata_fetch_failed,
+            "metadata_missing": metadata_missing,
         },
     }
     return record
@@ -442,6 +457,8 @@ def _failed_record(ticker: str, error: str, *, as_of: Optional[date] = None) -> 
             "fetch_status": "failed",
             "fetch_failed": True,
             "retry_failed": True,
+            "metadata_fetch_failed": True,
+            "metadata_missing": False,
         },
     }
 
@@ -549,15 +566,17 @@ class YFinanceProvider:
                 info = raw_info
         except Exception as exc:  # pragma: no cover - depends on live Yahoo
             info_error = str(exc)
+            info["__metadata_fetch_failed__"] = True
         try:
             history_frame = symbol.history(period="1y", interval="1d", auto_adjust=False, actions=False)
             history = _rows_from_history(history_frame)
         except Exception as exc:  # pragma: no cover - depends on live Yahoo
             history_error = str(exc)
-        try:
-            cashflow = getattr(symbol, "cashflow", None)
-        except Exception as exc:  # pragma: no cover - depends on live Yahoo
-            cashflow_error = str(exc)
+        if _pick(info, "freeCashflow", "freeCashFlow") is None:
+            try:
+                cashflow = getattr(symbol, "cashflow", None)
+            except Exception as exc:  # pragma: no cover - depends on live Yahoo
+                cashflow_error = str(exc)
         try:
             start = (date.today() - timedelta(days=550)).isoformat()
             shares = symbol.get_shares_full(start=start)
@@ -647,6 +666,10 @@ class SnapshotBundle:
     universe: List[str] = field(default_factory=list)
     retry_failed_count: int = 0
     fetch_failed_count: int = 0
+    sector_metadata_coverage: float = 0.0
+    industry_metadata_coverage: float = 0.0
+    metadata_fetch_failed_count: int = 0
+    metadata_missing_count: int = 0
     batch_size: int = DEFAULT_BATCH_SIZE
     retry_attempts: int = DEFAULT_RETRY_ATTEMPTS
 
@@ -661,6 +684,10 @@ class SnapshotBundle:
                 "record_count": len(self.records),
                 "retry_failed_count": self.retry_failed_count,
                 "fetch_failed_count": self.fetch_failed_count,
+                "sector_metadata_coverage": self.sector_metadata_coverage,
+                "industry_metadata_coverage": self.industry_metadata_coverage,
+                "metadata_fetch_failed_count": self.metadata_fetch_failed_count,
+                "metadata_missing_count": self.metadata_missing_count,
                 "batch_size": self.batch_size,
                 "retry_attempts": self.retry_attempts,
             },
@@ -696,6 +723,8 @@ def fetch_snapshot(
                 history = payload.get("history") if isinstance(payload, dict) else []
                 cashflow = payload.get("cashflow") if isinstance(payload, dict) else None
                 shares = payload.get("shares") if isinstance(payload, dict) else None
+                if isinstance(info, dict) and any("info" in error.lower() for error in _payload_errors(payload)):
+                    info.setdefault("__metadata_fetch_failed__", True)
                 record = _build_record(ticker, info or {}, _rows_from_history(history), cashflow=cashflow, shares=shares, as_of=as_of)
                 fetch_errors = _payload_errors(payload)
                 if fetch_errors:
@@ -737,6 +766,19 @@ def fetch_snapshot(
     else:
         status = "ok"
     fetch_failed_count = sum(1 for record in records if (record.get("raw") or {}).get("fetch_failed") is True)
+    record_count = len(records)
+    sector_metadata_coverage = (
+        sum(1 for record in records if _clean_metadata_text(record.get("sector")) is not None) / record_count
+        if record_count
+        else 0.0
+    )
+    industry_metadata_coverage = (
+        sum(1 for record in records if _clean_metadata_text(record.get("industry")) is not None) / record_count
+        if record_count
+        else 0.0
+    )
+    metadata_fetch_failed_count = sum(1 for record in records if (record.get("raw") or {}).get("metadata_fetch_failed") is True)
+    metadata_missing_count = sum(1 for record in records if (record.get("raw") or {}).get("metadata_missing") is True)
     return SnapshotBundle(
         source_name="yfinance",
         as_of=as_of.isoformat(),
@@ -748,6 +790,10 @@ def fetch_snapshot(
         universe=normalized_tickers,
         retry_failed_count=retry_failed_count,
         fetch_failed_count=fetch_failed_count,
+        sector_metadata_coverage=round(sector_metadata_coverage, 3),
+        industry_metadata_coverage=round(industry_metadata_coverage, 3),
+        metadata_fetch_failed_count=metadata_fetch_failed_count,
+        metadata_missing_count=metadata_missing_count,
         batch_size=batch_size,
         retry_attempts=retry_attempts,
     )
@@ -796,6 +842,10 @@ def load_snapshot(path: Path | str) -> SnapshotBundle:
         universe=universe or [_normalize_ticker(row.get("ticker")) for row in records if isinstance(row, dict) and row.get("ticker")],
         retry_failed_count=int(metadata.get("retry_failed_count") or 0),
         fetch_failed_count=int(metadata.get("fetch_failed_count") or 0),
+        sector_metadata_coverage=float(metadata.get("sector_metadata_coverage") or 0.0),
+        industry_metadata_coverage=float(metadata.get("industry_metadata_coverage") or 0.0),
+        metadata_fetch_failed_count=int(metadata.get("metadata_fetch_failed_count") or 0),
+        metadata_missing_count=int(metadata.get("metadata_missing_count") or 0),
         batch_size=int(metadata.get("batch_size") or DEFAULT_BATCH_SIZE),
         retry_attempts=int(metadata.get("retry_attempts") or DEFAULT_RETRY_ATTEMPTS),
     )
@@ -809,6 +859,10 @@ def build_summary(bundle: SnapshotBundle) -> str:
         f"股票數量：{len(bundle.records)}",
         f"retry_failed_count：{bundle.retry_failed_count}",
         f"fetch_failed_count：{bundle.fetch_failed_count}",
+        f"sector_metadata_coverage：{bundle.sector_metadata_coverage}",
+        f"industry_metadata_coverage：{bundle.industry_metadata_coverage}",
+        f"metadata_fetch_failed_count：{bundle.metadata_fetch_failed_count}",
+        f"metadata_missing_count：{bundle.metadata_missing_count}",
     ]
     if bundle.warnings:
         lines.append("")
@@ -868,6 +922,11 @@ def report_to_payload(report: Any) -> Dict[str, Any]:
         "effective_min_score_source": report.effective_min_score_source,
         "retry_failed_count": report.retry_failed_count,
         "fetch_failed_count": report.fetch_failed_count,
+        "sector_metadata_coverage": report.sector_metadata_coverage,
+        "industry_metadata_coverage": report.industry_metadata_coverage,
+        "metadata_fetch_failed_count": report.metadata_fetch_failed_count,
+        "metadata_missing_count": report.metadata_missing_count,
+        "sector_aware_status": report.sector_aware_status,
         "dedupe_removed_count": report.dedupe_removed_count,
         "candidates": [
             {
@@ -904,6 +963,11 @@ def report_to_markdown(report: Any, bundle: SnapshotBundle) -> str:
         f"- effective_min_score_source：{report.effective_min_score_source}",
         f"- retry_failed_count：{report.retry_failed_count}",
         f"- fetch_failed_count：{report.fetch_failed_count}",
+        f"- sector_metadata_coverage：{report.sector_metadata_coverage}",
+        f"- industry_metadata_coverage：{report.industry_metadata_coverage}",
+        f"- metadata_fetch_failed_count：{report.metadata_fetch_failed_count}",
+        f"- metadata_missing_count：{report.metadata_missing_count}",
+        f"- sector_aware_status：{report.sector_aware_status}",
         f"- dedupe_removed_count：{report.dedupe_removed_count}",
         f"- 通過 {len(report.candidates)} 檔",
         f"- 剔除 {len(report.excluded)} 檔",

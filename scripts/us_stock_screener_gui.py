@@ -1248,6 +1248,7 @@ class ScreenerApp(tk.Tk):
             f"Sector-aware preview：{_format_sector_relative_preview(item) or 'N/A'}",
             f"Peer source：{_format_sector_relative_peer_source(item) or 'N/A'}",
             f"Peer count：{item.sector_relative_peer_count if item.sector_relative_peer_count is not None else 'N/A'}",
+            f"Peer reason：{item.sector_relative_peer_reason or 'N/A'}",
             f"基本面：{item.factor_scores.get('fundamental')}",
             f"動量：{item.factor_scores.get('momentum')}",
             f"風險安全：{item.factor_scores.get('risk_safety')}",
@@ -1337,6 +1338,11 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
         f"high_volatility_candidate_count：{report.high_volatility_candidate_count}",
         f"deep_drawdown_candidate_count：{report.deep_drawdown_candidate_count}",
         f"missing_data_candidate_count：{report.missing_data_candidate_count}",
+        f"sector_metadata_coverage：{report.sector_metadata_coverage}",
+        f"industry_metadata_coverage：{report.industry_metadata_coverage}",
+        f"metadata_fetch_failed_count：{report.metadata_fetch_failed_count}",
+        f"metadata_missing_count：{report.metadata_missing_count}",
+        f"sector_aware_status：{report.sector_aware_status}",
         f"sector_aware_official_scoring：{'啟用' if report.sector_aware_official_scoring else '未啟用'}",
         f"sector_aware_shadow_mode：{'啟用' if report.sector_aware_shadow_mode else '未啟用'}",
         f"sector_aware_preview_available_count：{report.sector_aware_preview_available_count}",
@@ -1346,9 +1352,12 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
         f"sector_aware_preview_coverage：{report.sector_aware_preview_coverage}",
         f"sector_aware_score_correlation_with_current：{report.sector_aware_score_correlation_with_current}",
         f"sector_aware_top_10_overlap：{report.sector_aware_top_10_overlap} / {report.sector_aware_top_10_overlap_total}",
+        f"sector_aware_industry_peer_used_count：{report.sector_aware_industry_peer_used_count}",
+        f"sector_aware_sector_only_peer_used_count：{report.sector_aware_sector_only_peer_used_count}",
         f"sector_aware_sector_peer_used_count：{report.sector_aware_sector_peer_used_count}",
         f"sector_aware_universe_fallback_count：{report.sector_aware_universe_fallback_count}",
-        f"sector_aware_missing_sector_count：{report.sector_aware_missing_sector_count}",
+        f"sector_aware_universe_missing_metadata_count：{report.sector_aware_universe_missing_metadata_count}",
+        f"sector_aware_not_scored_disabled_count：{report.sector_aware_not_scored_disabled_count}",
         f"sector_aware_average_peer_count：{report.sector_aware_average_peer_count}",
         f"sector_aware_min_peer_count：{report.sector_aware_min_peer_count}",
         f"sector_aware_max_peer_count：{report.sector_aware_max_peer_count}",
@@ -1391,6 +1400,7 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
         lines.append(f"   Sector-aware preview：{_format_sector_relative_preview(item) or 'N/A'}")
         lines.append(f"   Peer source：{_format_sector_relative_peer_source(item) or 'N/A'}")
         lines.append(f"   Peer count：{item.sector_relative_peer_count if item.sector_relative_peer_count is not None else 'N/A'}")
+        lines.append(f"   Peer reason：{item.sector_relative_peer_reason or 'N/A'}")
         if item.suggested_action:
             lines.append(f"   動作：{item.suggested_action}")
         if item.confidence_score is not None:

@@ -62,6 +62,13 @@ def _pick(data: Dict[str, Any], *keys: str) -> Any:
     return None
 
 
+def _clean_metadata_text(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def _average(values: Sequence[Tuple[float, float]]) -> Optional[float]:
     total_weight = 0.0
     total_score = 0.0
@@ -545,6 +552,7 @@ STOP_CHECKING_PRICE_DEDUPE_COMPANY_GROUPS = {
 }
 
 SECTOR_RELATIVE_MIN_PEERS = 30
+SECTOR_METADATA_COVERAGE_GATE = 0.90
 SECTOR_RELATIVE_FACTOR_FIELDS = {
     "growth": [
         ("revenue_growth_yoy", "higher"),
@@ -758,6 +766,7 @@ class ScreenResult:
     sector_relative_factor_scores: Dict[str, Optional[float]] = field(default_factory=dict)
     sector_relative_peer_source: Optional[str] = None
     sector_relative_peer_count: Optional[int] = None
+    sector_relative_peer_reason: Optional[str] = None
     legacy_total_score: Optional[float] = None
     legacy_raw_score: Optional[float] = None
     legacy_adjusted_score: Optional[float] = None
@@ -802,6 +811,11 @@ class ScreeningReport:
     deep_drawdown_candidate_count: int = 0
     missing_data_candidate_count: int = 0
     sector_aware_official_scoring: bool = True
+    sector_aware_status: str = "enabled"
+    sector_metadata_coverage: float = 0.0
+    industry_metadata_coverage: float = 0.0
+    metadata_fetch_failed_count: int = 0
+    metadata_missing_count: int = 0
     sector_aware_shadow_mode: bool = True
     sector_aware_preview_available_count: int = 0
     sector_aware_preview_missing_count: int = 0
@@ -817,8 +831,12 @@ class ScreeningReport:
     sector_aware_large_rank_change_threshold: int = SECTOR_RELATIVE_LARGE_RANK_CHANGE_THRESHOLD
     sector_aware_largest_movers: List[Dict[str, Any]] = field(default_factory=list)
     sector_aware_sector_peer_used_count: int = 0
+    sector_aware_industry_peer_used_count: int = 0
+    sector_aware_sector_only_peer_used_count: int = 0
     sector_aware_universe_fallback_count: int = 0
     sector_aware_missing_sector_count: int = 0
+    sector_aware_universe_missing_metadata_count: int = 0
+    sector_aware_not_scored_disabled_count: int = 0
     sector_aware_average_peer_count: Optional[float] = None
     sector_aware_min_peer_count: Optional[int] = None
     sector_aware_max_peer_count: Optional[int] = None
@@ -831,8 +849,8 @@ def _canonicalize_record(payload: Dict[str, Any]) -> StockRecord:
     return StockRecord(
         ticker=ticker,
         company_name=_pick(payload, "company_name", "name"),
-        sector=_pick(payload, "sector"),
-        industry=_pick(payload, "industry"),
+        sector=_clean_metadata_text(_pick(payload, "sector")),
+        industry=_clean_metadata_text(_pick(payload, "industry")),
         price=_coerce_float(_pick(payload, "price", "last_price", "close")),
         market_cap=_coerce_float(_pick(payload, "market_cap", "marketcap")),
         avg_dollar_volume_20d=_coerce_float(_pick(payload, "avg_dollar_volume_20d", "dollar_volume_20d")),
@@ -2209,27 +2227,32 @@ def _sector_relative_field_value(record: StockRecord, field_name: str) -> Option
     return number
 
 
-def _sector_relative_peer_provenance(item: ScreenResult, candidates: Sequence[ScreenResult]) -> Tuple[str, int, int]:
+def _sector_relative_peer_provenance(item: ScreenResult, candidates: Sequence[ScreenResult]) -> Tuple[str, int, int, str]:
     universe_records = [candidate.record for candidate in candidates if candidate.record is not None]
     if item.record is None:
-        return "missing_record", 0, 0
+        return "universe_missing_metadata", 0, 0, "missing record; preview cannot use industry or sector peers."
     industry = (item.record.industry or "").strip()
     if industry:
         industry_records = [record for record in universe_records if (record.industry or "").strip() == industry]
         if len(industry_records) >= SECTOR_RELATIVE_MIN_PEERS:
-            return "industry", len(industry_records), len(industry_records)
+            return "industry", len(industry_records), len(industry_records), f"industry peer count {len(industry_records)} >= {SECTOR_RELATIVE_MIN_PEERS}."
     sector = (item.record.sector or "").strip()
     if not sector:
-        return "missing_sector", len(universe_records), 0
+        return "universe_missing_metadata", len(universe_records), 0, "missing sector or industry metadata; preview used universe peers."
     sector_records = [record for record in universe_records if (record.sector or "").strip() == sector]
     if len(sector_records) >= SECTOR_RELATIVE_MIN_PEERS:
-        return "sector", len(sector_records), len(sector_records)
-    return "universe_fallback", len(universe_records), len(sector_records)
+        return "sector", len(sector_records), len(sector_records), f"sector peer count {len(sector_records)} >= {SECTOR_RELATIVE_MIN_PEERS}."
+    return (
+        "universe_insufficient_peers",
+        len(universe_records),
+        len(sector_records),
+        f"industry/sector peer count {len(sector_records)} < {SECTOR_RELATIVE_MIN_PEERS}; preview used universe peers.",
+    )
 
 
 def _sector_relative_peer_records(item: ScreenResult, candidates: Sequence[ScreenResult]) -> Tuple[List[StockRecord], str, int]:
     universe_records = [candidate.record for candidate in candidates if candidate.record is not None]
-    peer_source, _peer_count, sector_count = _sector_relative_peer_provenance(item, candidates)
+    peer_source, _peer_count, sector_count, _peer_reason = _sector_relative_peer_provenance(item, candidates)
     if peer_source == "industry" and item.record is not None:
         industry = (item.record.industry or "").strip()
         return [record for record in universe_records if (record.industry or "").strip() == industry], peer_source, sector_count
@@ -2263,9 +2286,9 @@ def _sector_relative_factor_score(
     if winsorized_peer_values:
         value = winsorize_value(value, min(winsorized_peer_values), max(winsorized_peer_values))
         valid_peer_values = winsorized_peer_values
-    if peer_source == "missing_sector":
-        notes.append("missing sector; used universe fallback.")
-    elif peer_source == "universe_fallback":
+    if peer_source == "universe_missing_metadata":
+        notes.append("missing sector or industry metadata; used universe fallback.")
+    elif peer_source == "universe_insufficient_peers":
         notes.append(f"sector peer count {sector_count} < {SECTOR_RELATIVE_MIN_PEERS}; used universe fallback.")
     if direction == "higher":
         score = score_higher_is_better(value, valid_peer_values, missing_policy="ignore")
@@ -2344,6 +2367,7 @@ def _sector_relative_mover(item: ScreenResult) -> Dict[str, Any]:
         "notes": item.sector_relative_notes[:5],
         "peer_source": item.sector_relative_peer_source,
         "peer_count": item.sector_relative_peer_count,
+        "peer_reason": item.sector_relative_peer_reason,
     }
 
 
@@ -2367,9 +2391,10 @@ def apply_sector_relative_preview(candidates: Sequence[ScreenResult], strategy_m
     strategy_mode = _normalize_strategy_mode(strategy_mode)
     current_ranks = {item.ticker: index for index, item in enumerate(candidates, start=1)}
     for item in candidates:
-        peer_source, peer_count, _sector_count = _sector_relative_peer_provenance(item, candidates)
+        peer_source, peer_count, _sector_count, peer_reason = _sector_relative_peer_provenance(item, candidates)
         item.sector_relative_peer_source = peer_source
         item.sector_relative_peer_count = peer_count
+        item.sector_relative_peer_reason = peer_reason
         preview_score, factor_scores, notes = _sector_relative_scores_for_candidate(item, candidates, strategy_mode)
         item.sector_relative_score_preview = preview_score
         item.sector_relative_factor_scores = factor_scores
@@ -2443,8 +2468,12 @@ def apply_sector_relative_preview(candidates: Sequence[ScreenResult], strategy_m
         "sector_aware_large_rank_change_threshold": SECTOR_RELATIVE_LARGE_RANK_CHANGE_THRESHOLD,
         "sector_aware_largest_movers": [_sector_relative_mover(item) for item in largest_movers[:10]],
         "sector_aware_sector_peer_used_count": sum(1 for item in ranked_preview if item.sector_relative_peer_source in {"industry", "sector"}),
-        "sector_aware_universe_fallback_count": sum(1 for item in ranked_preview if item.sector_relative_peer_source == "universe_fallback"),
-        "sector_aware_missing_sector_count": sum(1 for item in ranked_preview if item.sector_relative_peer_source == "missing_sector"),
+        "sector_aware_industry_peer_used_count": sum(1 for item in ranked_preview if item.sector_relative_peer_source == "industry"),
+        "sector_aware_sector_only_peer_used_count": sum(1 for item in ranked_preview if item.sector_relative_peer_source == "sector"),
+        "sector_aware_universe_fallback_count": sum(1 for item in ranked_preview if item.sector_relative_peer_source == "universe_insufficient_peers"),
+        "sector_aware_missing_sector_count": sum(1 for item in ranked_preview if item.sector_relative_peer_source == "universe_missing_metadata"),
+        "sector_aware_universe_missing_metadata_count": sum(1 for item in ranked_preview if item.sector_relative_peer_source == "universe_missing_metadata"),
+        "sector_aware_not_scored_disabled_count": sum(1 for item in ranked_preview if item.sector_relative_peer_source == "not_scored_sector_aware_disabled"),
         "sector_aware_average_peer_count": _safe_round(sum(peer_counts) / len(peer_counts)) if peer_counts else None,
         "sector_aware_min_peer_count": min(peer_counts) if peer_counts else None,
         "sector_aware_max_peer_count": max(peer_counts) if peer_counts else None,
@@ -2472,12 +2501,12 @@ def _format_sector_relative_peer_source(item: ScreenResult) -> str:
     if source == "sector":
         sector = (item.record.sector or "").strip() if item.record is not None else ""
         return f"{sector} sector" if sector else "Sector peers"
-    if source == "universe_fallback":
-        return "Universe fallback"
-    if source == "missing_sector":
-        return "Universe fallback (missing sector)"
-    if source == "missing_record":
-        return "N/A"
+    if source == "universe_insufficient_peers":
+        return "Universe fallback (insufficient peers)"
+    if source == "universe_missing_metadata":
+        return "Universe fallback (missing metadata)"
+    if source == "not_scored_sector_aware_disabled":
+        return "Not scored: sector-aware disabled"
     return ""
 
 
@@ -2496,6 +2525,34 @@ def _store_legacy_scores(item: ScreenResult) -> None:
     item.factor_scores["legacy_risk_safety_score"] = item.legacy_risk_safety_score
 
 
+def _metadata_flag(record: StockRecord, key: str) -> bool:
+    raw = record.raw or {}
+    nested_raw = raw.get("raw") if isinstance(raw.get("raw"), dict) else {}
+    return raw.get(key) is True or (isinstance(nested_raw, dict) and nested_raw.get(key) is True)
+
+
+def _metadata_coverage(records: Sequence[StockRecord]) -> Dict[str, Any]:
+    total = len(records)
+    sector_count = sum(1 for record in records if _clean_metadata_text(record.sector) is not None)
+    industry_count = sum(1 for record in records if _clean_metadata_text(record.industry) is not None)
+    return {
+        "sector_metadata_coverage": _safe_round(sector_count / total, 3) if total else 0.0,
+        "industry_metadata_coverage": _safe_round(industry_count / total, 3) if total else 0.0,
+        "metadata_fetch_failed_count": sum(1 for record in records if _metadata_flag(record, "metadata_fetch_failed")),
+        "metadata_missing_count": sum(1 for record in records if _metadata_flag(record, "metadata_missing")),
+    }
+
+
+def _disable_official_sector_aware(candidates: Sequence[ScreenResult]) -> None:
+    for item in candidates:
+        if item.legacy_total_score is None:
+            _store_legacy_scores(item)
+        item.sector_relative_peer_source = "not_scored_sector_aware_disabled"
+        item.sector_relative_peer_count = 0
+        item.sector_relative_peer_reason = "official sector-aware scoring disabled because sector metadata coverage is below 90%."
+        item.factor_scores["sector_aware_official_score"] = False
+
+
 def promote_sector_relative_scores(
     candidates: Sequence[ScreenResult],
     strategy_mode: str,
@@ -2508,7 +2565,8 @@ def promote_sector_relative_scores(
     for item in candidates:
         if item.sector_relative_score_preview is None:
             continue
-        _store_legacy_scores(item)
+        if item.legacy_total_score is None:
+            _store_legacy_scores(item)
         factor_scores = item.sector_relative_factor_scores
         sector_raw_score = item.sector_relative_score_preview
         if strategy_mode == "hybrid":
@@ -2845,6 +2903,10 @@ def screen_records(
         score_record(record, config, strategy_mode=strategy_mode, as_of=as_of, force_rebalance=force_rebalance)
         for record in records
     ]
+    scored_records = [item.record for item in scored if item.record is not None]
+    metadata_summary = _metadata_coverage(scored_records)
+    sector_aware_enabled = (metadata_summary["sector_metadata_coverage"] or 0.0) >= SECTOR_METADATA_COVERAGE_GATE
+    sector_aware_status = "enabled" if sector_aware_enabled else "disabled_insufficient_sector_metadata"
     candidates = [item for item in scored if item.is_candidate]
     excluded = [item for item in scored if not item.is_candidate]
     hard_pass_count = len(candidates)
@@ -2858,7 +2920,10 @@ def screen_records(
         )
     )
     sector_relative_summary = apply_sector_relative_preview(candidates, strategy_mode)
-    promote_sector_relative_scores(candidates, strategy_mode, config=config, review_flag=review_flag)
+    if sector_aware_enabled:
+        promote_sector_relative_scores(candidates, strategy_mode, config=config, review_flag=review_flag)
+    else:
+        _disable_official_sector_aware(candidates)
 
     if strategy_mode == "stop_checking_price":
         candidates.sort(
@@ -2968,7 +3033,12 @@ def screen_records(
         high_volatility_candidate_count=ranking_diagnostics["high_volatility_candidate_count"],
         deep_drawdown_candidate_count=ranking_diagnostics["deep_drawdown_candidate_count"],
         missing_data_candidate_count=ranking_diagnostics["missing_data_candidate_count"],
-        sector_aware_official_scoring=sector_relative_summary["sector_aware_official_scoring"],
+        sector_aware_official_scoring=sector_aware_enabled,
+        sector_aware_status=sector_aware_status,
+        sector_metadata_coverage=metadata_summary["sector_metadata_coverage"],
+        industry_metadata_coverage=metadata_summary["industry_metadata_coverage"],
+        metadata_fetch_failed_count=metadata_summary["metadata_fetch_failed_count"],
+        metadata_missing_count=metadata_summary["metadata_missing_count"],
         sector_aware_shadow_mode=sector_relative_summary["sector_aware_shadow_mode"],
         sector_aware_preview_available_count=sector_relative_summary["sector_aware_preview_available_count"],
         sector_aware_preview_missing_count=sector_relative_summary["sector_aware_preview_missing_count"],
@@ -2983,9 +3053,13 @@ def screen_records(
         sector_aware_large_rank_change_count=sector_relative_summary["sector_aware_large_rank_change_count"],
         sector_aware_large_rank_change_threshold=sector_relative_summary["sector_aware_large_rank_change_threshold"],
         sector_aware_largest_movers=sector_relative_summary["sector_aware_largest_movers"],
-        sector_aware_sector_peer_used_count=sector_relative_summary["sector_aware_sector_peer_used_count"],
-        sector_aware_universe_fallback_count=sector_relative_summary["sector_aware_universe_fallback_count"],
-        sector_aware_missing_sector_count=sector_relative_summary["sector_aware_missing_sector_count"],
+        sector_aware_sector_peer_used_count=0 if not sector_aware_enabled else sector_relative_summary["sector_aware_sector_peer_used_count"],
+        sector_aware_industry_peer_used_count=0 if not sector_aware_enabled else sector_relative_summary["sector_aware_industry_peer_used_count"],
+        sector_aware_sector_only_peer_used_count=0 if not sector_aware_enabled else sector_relative_summary["sector_aware_sector_only_peer_used_count"],
+        sector_aware_universe_fallback_count=0 if not sector_aware_enabled else sector_relative_summary["sector_aware_universe_fallback_count"],
+        sector_aware_missing_sector_count=0 if not sector_aware_enabled else sector_relative_summary["sector_aware_missing_sector_count"],
+        sector_aware_universe_missing_metadata_count=0 if not sector_aware_enabled else sector_relative_summary["sector_aware_universe_missing_metadata_count"],
+        sector_aware_not_scored_disabled_count=len(displayed_candidates) if not sector_aware_enabled else 0,
         sector_aware_average_peer_count=sector_relative_summary["sector_aware_average_peer_count"],
         sector_aware_min_peer_count=sector_relative_summary["sector_aware_min_peer_count"],
         sector_aware_max_peer_count=sector_relative_summary["sector_aware_max_peer_count"],
@@ -3022,6 +3096,11 @@ def _render_markdown(report: ScreeningReport) -> str:
     lines.append(f"- high_volatility_candidate_count：{report.high_volatility_candidate_count}")
     lines.append(f"- deep_drawdown_candidate_count：{report.deep_drawdown_candidate_count}")
     lines.append(f"- missing_data_candidate_count：{report.missing_data_candidate_count}")
+    lines.append(f"- sector_metadata_coverage：{report.sector_metadata_coverage}")
+    lines.append(f"- industry_metadata_coverage：{report.industry_metadata_coverage}")
+    lines.append(f"- metadata_fetch_failed_count：{report.metadata_fetch_failed_count}")
+    lines.append(f"- metadata_missing_count：{report.metadata_missing_count}")
+    lines.append(f"- sector_aware_status：{report.sector_aware_status}")
     lines.append(f"- sector_aware_official_scoring：{'啟用' if report.sector_aware_official_scoring else '未啟用'}")
     lines.append(f"- sector_aware_shadow_mode：{'啟用' if report.sector_aware_shadow_mode else '未啟用'}")
     lines.append(f"- sector_aware_preview_available_count：{report.sector_aware_preview_available_count}")
@@ -3031,9 +3110,12 @@ def _render_markdown(report: ScreeningReport) -> str:
     lines.append(f"- sector_aware_preview_coverage：{report.sector_aware_preview_coverage}")
     lines.append(f"- sector_aware_score_correlation_with_current：{report.sector_aware_score_correlation_with_current}")
     lines.append(f"- sector_aware_top_10_overlap：{report.sector_aware_top_10_overlap} / {report.sector_aware_top_10_overlap_total}")
+    lines.append(f"- sector_aware_industry_peer_used_count：{report.sector_aware_industry_peer_used_count}")
+    lines.append(f"- sector_aware_sector_only_peer_used_count：{report.sector_aware_sector_only_peer_used_count}")
     lines.append(f"- sector_aware_sector_peer_used_count：{report.sector_aware_sector_peer_used_count}")
     lines.append(f"- sector_aware_universe_fallback_count：{report.sector_aware_universe_fallback_count}")
-    lines.append(f"- sector_aware_missing_sector_count：{report.sector_aware_missing_sector_count}")
+    lines.append(f"- sector_aware_universe_missing_metadata_count：{report.sector_aware_universe_missing_metadata_count}")
+    lines.append(f"- sector_aware_not_scored_disabled_count：{report.sector_aware_not_scored_disabled_count}")
     lines.append(f"- sector_aware_average_peer_count：{report.sector_aware_average_peer_count}")
     lines.append(f"- sector_aware_min_peer_count：{report.sector_aware_min_peer_count}")
     lines.append(f"- sector_aware_max_peer_count：{report.sector_aware_max_peer_count}")
@@ -3064,13 +3146,13 @@ def _render_markdown(report: ScreeningReport) -> str:
     lines.append("")
     lines.append("## 候選名單")
     lines.append("")
-    lines.append("| 排名 | Ticker | 總分 | Legacy score | Sector-aware preview | Peer source | Peer count | 資料品質 | 動作 | 基本面 | 動量 | 風險安全 | 主要理由 | 風險警示 |")
-    lines.append("| --- | --- | ---: | ---: | --- | --- | ---: | ---: | --- | ---: | ---: | ---: | --- | --- |")
+    lines.append("| 排名 | Ticker | 總分 | Legacy score | Sector-aware preview | Peer source | Peer count | Peer reason | 資料品質 | 動作 | 基本面 | 動量 | 風險安全 | 主要理由 | 風險警示 |")
+    lines.append("| --- | --- | ---: | ---: | --- | --- | ---: | --- | ---: | --- | ---: | ---: | ---: | --- | --- |")
     for index, item in enumerate(report.candidates, start=1):
         warnings = "；".join(item.risk_warnings) if item.risk_warnings else "無"
         reasons = "；".join(item.reasons)
         lines.append(
-            "| {rank} | {ticker} | {total} | {legacy_total} | {sector_preview} | {peer_source} | {peer_count} | {data_quality} | {action} | {fundamental} | {momentum} | {risk} | {reasons} | {warnings} |".format(
+            "| {rank} | {ticker} | {total} | {legacy_total} | {sector_preview} | {peer_source} | {peer_count} | {peer_reason} | {data_quality} | {action} | {fundamental} | {momentum} | {risk} | {reasons} | {warnings} |".format(
                 rank=index,
                 ticker=item.ticker,
                 total=item.total_score if item.total_score is not None else "",
@@ -3078,6 +3160,7 @@ def _render_markdown(report: ScreeningReport) -> str:
                 sector_preview=_format_sector_relative_preview(item),
                 peer_source=_format_sector_relative_peer_source(item),
                 peer_count=item.sector_relative_peer_count if item.sector_relative_peer_count is not None else "",
+                peer_reason=item.sector_relative_peer_reason or "",
                 data_quality=item.data_quality_score if item.data_quality_score is not None else "",
                 action=item.suggested_action or "",
                 fundamental=item.factor_scores.get("fundamental") or "",
@@ -3157,6 +3240,11 @@ def _render_json(report: ScreeningReport) -> str:
         "high_volatility_candidate_count": report.high_volatility_candidate_count,
         "deep_drawdown_candidate_count": report.deep_drawdown_candidate_count,
         "missing_data_candidate_count": report.missing_data_candidate_count,
+        "sector_metadata_coverage": report.sector_metadata_coverage,
+        "industry_metadata_coverage": report.industry_metadata_coverage,
+        "metadata_fetch_failed_count": report.metadata_fetch_failed_count,
+        "metadata_missing_count": report.metadata_missing_count,
+        "sector_aware_status": report.sector_aware_status,
         "sector_aware_official_scoring": report.sector_aware_official_scoring,
         "sector_aware_shadow_mode": report.sector_aware_shadow_mode,
         "sector_aware_preview_available_count": report.sector_aware_preview_available_count,
@@ -3169,9 +3257,13 @@ def _render_json(report: ScreeningReport) -> str:
         "sector_aware_score_correlation_with_current": report.sector_aware_score_correlation_with_current,
         "sector_aware_top_10_overlap": report.sector_aware_top_10_overlap,
         "sector_aware_top_10_overlap_total": report.sector_aware_top_10_overlap_total,
+        "sector_aware_industry_peer_used_count": report.sector_aware_industry_peer_used_count,
+        "sector_aware_sector_only_peer_used_count": report.sector_aware_sector_only_peer_used_count,
         "sector_aware_sector_peer_used_count": report.sector_aware_sector_peer_used_count,
         "sector_aware_universe_fallback_count": report.sector_aware_universe_fallback_count,
         "sector_aware_missing_sector_count": report.sector_aware_missing_sector_count,
+        "sector_aware_universe_missing_metadata_count": report.sector_aware_universe_missing_metadata_count,
+        "sector_aware_not_scored_disabled_count": report.sector_aware_not_scored_disabled_count,
         "sector_aware_average_peer_count": report.sector_aware_average_peer_count,
         "sector_aware_min_peer_count": report.sector_aware_min_peer_count,
         "sector_aware_max_peer_count": report.sector_aware_max_peer_count,
@@ -3219,6 +3311,7 @@ def _render_json(report: ScreeningReport) -> str:
                 "sector_relative_factor_scores": item.sector_relative_factor_scores,
                 "sector_relative_peer_source": item.sector_relative_peer_source,
                 "sector_relative_peer_count": item.sector_relative_peer_count,
+                "sector_relative_peer_reason": item.sector_relative_peer_reason,
             }
             for item in report.candidates
         ],

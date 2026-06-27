@@ -184,6 +184,7 @@ def _result_to_payload(item: Any) -> Dict[str, Any]:
         "sector_relative_factor_scores": item.sector_relative_factor_scores,
         "sector_relative_peer_source": item.sector_relative_peer_source,
         "sector_relative_peer_count": item.sector_relative_peer_count,
+        "sector_relative_peer_reason": item.sector_relative_peer_reason,
     }
 
 
@@ -216,6 +217,11 @@ def _report_to_payload(report: Any, *, source_name: str, bundle: Any = None) -> 
         "high_volatility_candidate_count": report.high_volatility_candidate_count,
         "deep_drawdown_candidate_count": report.deep_drawdown_candidate_count,
         "missing_data_candidate_count": report.missing_data_candidate_count,
+        "sector_metadata_coverage": report.sector_metadata_coverage,
+        "industry_metadata_coverage": report.industry_metadata_coverage,
+        "metadata_fetch_failed_count": report.metadata_fetch_failed_count,
+        "metadata_missing_count": report.metadata_missing_count,
+        "sector_aware_status": report.sector_aware_status,
         "sector_aware_official_scoring": report.sector_aware_official_scoring,
         "sector_aware_shadow_mode": report.sector_aware_shadow_mode,
         "sector_aware_preview_available_count": report.sector_aware_preview_available_count,
@@ -228,9 +234,13 @@ def _report_to_payload(report: Any, *, source_name: str, bundle: Any = None) -> 
         "sector_aware_score_correlation_with_current": report.sector_aware_score_correlation_with_current,
         "sector_aware_top_10_overlap": report.sector_aware_top_10_overlap,
         "sector_aware_top_10_overlap_total": report.sector_aware_top_10_overlap_total,
+        "sector_aware_industry_peer_used_count": report.sector_aware_industry_peer_used_count,
+        "sector_aware_sector_only_peer_used_count": report.sector_aware_sector_only_peer_used_count,
         "sector_aware_sector_peer_used_count": report.sector_aware_sector_peer_used_count,
         "sector_aware_universe_fallback_count": report.sector_aware_universe_fallback_count,
         "sector_aware_missing_sector_count": report.sector_aware_missing_sector_count,
+        "sector_aware_universe_missing_metadata_count": report.sector_aware_universe_missing_metadata_count,
+        "sector_aware_not_scored_disabled_count": report.sector_aware_not_scored_disabled_count,
         "sector_aware_average_peer_count": report.sector_aware_average_peer_count,
         "sector_aware_min_peer_count": report.sector_aware_min_peer_count,
         "sector_aware_max_peer_count": report.sector_aware_max_peer_count,
@@ -246,6 +256,10 @@ def _report_to_payload(report: Any, *, source_name: str, bundle: Any = None) -> 
             "warnings": bundle.warnings[:20],
             "retry_failed_count": bundle.retry_failed_count,
             "fetch_failed_count": bundle.fetch_failed_count,
+            "sector_metadata_coverage": bundle.sector_metadata_coverage,
+            "industry_metadata_coverage": bundle.industry_metadata_coverage,
+            "metadata_fetch_failed_count": bundle.metadata_fetch_failed_count,
+            "metadata_missing_count": bundle.metadata_missing_count,
         },
         "candidates": [_result_to_payload(item) for item in report.candidates],
         "hard_excluded": [_result_to_payload(item) for item in report.hard_excluded],
@@ -592,9 +606,9 @@ INDEX_HTML = r"""<!doctype html>
       if (item.sector_relative_peer_source === 'sector') {
         return item.sector ? `${item.sector} sector` : 'Sector peers';
       }
-      if (item.sector_relative_peer_source === 'universe_fallback') return 'Universe fallback';
-      if (item.sector_relative_peer_source === 'missing_sector') return 'Universe fallback (missing sector)';
-      if (item.sector_relative_peer_source === 'missing_record') return 'N/A';
+      if (item.sector_relative_peer_source === 'universe_insufficient_peers') return 'Universe fallback (insufficient peers)';
+      if (item.sector_relative_peer_source === 'universe_missing_metadata') return 'Universe fallback (missing metadata)';
+      if (item.sector_relative_peer_source === 'not_scored_sector_aware_disabled') return 'Not scored: sector-aware disabled';
       return '';
     }
 
@@ -605,7 +619,7 @@ INDEX_HTML = r"""<!doctype html>
       setMetric('mPenalty', report.soft_penalty_count);
       setMetric('mMissing', report.missing_data_count);
       setMetric('mFetchFailed', report.fetch_failed_count);
-      $('modePill').textContent = `${report.strategy_mode}｜${report.ranking_style}｜min_score ${report.min_score ?? '未設定'}｜${report.effective_min_score_source}`;
+      $('modePill').textContent = `${report.strategy_mode}｜${report.ranking_style}｜${report.sector_aware_status}｜min_score ${report.min_score ?? '未設定'}｜${report.effective_min_score_source}`;
 
       const body = $('rows');
       body.innerHTML = '';
@@ -658,6 +672,11 @@ INDEX_HTML = r"""<!doctype html>
         `high_volatility_candidate_count：${report.high_volatility_candidate_count}`,
         `deep_drawdown_candidate_count：${report.deep_drawdown_candidate_count}`,
         `missing_data_candidate_count：${report.missing_data_candidate_count}`,
+        `sector_metadata_coverage：${report.sector_metadata_coverage}`,
+        `industry_metadata_coverage：${report.industry_metadata_coverage}`,
+        `metadata_fetch_failed_count：${report.metadata_fetch_failed_count}`,
+        `metadata_missing_count：${report.metadata_missing_count}`,
+        `sector_aware_status：${report.sector_aware_status}`,
         `sector_aware_official_scoring：${report.sector_aware_official_scoring ? '啟用' : '未啟用'}`,
         `sector_aware_shadow_mode：${report.sector_aware_shadow_mode ? '啟用' : '未啟用'}`,
         `sector_aware_preview_available_count：${report.sector_aware_preview_available_count}`,
@@ -667,9 +686,12 @@ INDEX_HTML = r"""<!doctype html>
         `sector_aware_preview_coverage：${report.sector_aware_preview_coverage}`,
         `sector_aware_score_correlation_with_current：${report.sector_aware_score_correlation_with_current}`,
         `sector_aware_top_10_overlap：${report.sector_aware_top_10_overlap} / ${report.sector_aware_top_10_overlap_total}`,
+        `sector_aware_industry_peer_used_count：${report.sector_aware_industry_peer_used_count}`,
+        `sector_aware_sector_only_peer_used_count：${report.sector_aware_sector_only_peer_used_count}`,
         `sector_aware_sector_peer_used_count：${report.sector_aware_sector_peer_used_count}`,
         `sector_aware_universe_fallback_count：${report.sector_aware_universe_fallback_count}`,
-        `sector_aware_missing_sector_count：${report.sector_aware_missing_sector_count}`,
+        `sector_aware_universe_missing_metadata_count：${report.sector_aware_universe_missing_metadata_count}`,
+        `sector_aware_not_scored_disabled_count：${report.sector_aware_not_scored_disabled_count}`,
         `sector_aware_average_peer_count：${report.sector_aware_average_peer_count}`,
         `sector_aware_min_peer_count：${report.sector_aware_min_peer_count}`,
         `sector_aware_max_peer_count：${report.sector_aware_max_peer_count}`,
@@ -692,6 +714,7 @@ INDEX_HTML = r"""<!doctype html>
         lines.push(`   Sector-aware preview：${formatSectorPreview(item) || 'N/A'}`);
         lines.push(`   Peer source：${formatPeerSource(item) || 'N/A'}`);
         lines.push(`   Peer count：${item.sector_relative_peer_count ?? 'N/A'}`);
+        lines.push(`   Peer reason：${item.sector_relative_peer_reason ?? 'N/A'}`);
         if (item.suggested_action) lines.push(`   動作：${item.suggested_action}`);
         if (item.confidence_score !== null && item.confidence_score !== undefined) {
           lines.push(`   信心：${item.confidence_label || 'N/A'} (${item.confidence_score})`);
@@ -776,6 +799,7 @@ INDEX_HTML = r"""<!doctype html>
         `Sector-aware preview：${formatSectorPreview(item) || 'N/A'}`,
         `Peer source：${formatPeerSource(item) || 'N/A'}`,
         `Peer count：${item.sector_relative_peer_count ?? 'N/A'}`,
+        `Peer reason：${item.sector_relative_peer_reason ?? 'N/A'}`,
         `Sector-aware factors：${item.sector_relative_factor_scores ? Object.entries(item.sector_relative_factor_scores).map(([key, value]) => `${key}=${value}`).join('；') : 'N/A'}`,
         '',
         '入選理由：',
