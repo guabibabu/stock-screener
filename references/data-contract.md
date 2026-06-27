@@ -125,6 +125,12 @@ All strategy modes can emit these report-level diagnostics:
 - `sector_aware_top_movers_up`
 - `sector_aware_top_movers_down`
 - `sector_aware_largest_movers`
+- `sector_aware_sector_peer_used_count`
+- `sector_aware_universe_fallback_count`
+- `sector_aware_missing_sector_count`
+- `sector_aware_average_peer_count`
+- `sector_aware_min_peer_count`
+- `sector_aware_max_peer_count`
 
 Hybrid candidates can use `CANDIDATE_HIGH_RISK` or `CANDIDATE_DATA_LIMITED` when a name is still ranked but should not be read as a clean low-risk candidate.
 
@@ -140,6 +146,17 @@ Each candidate can include:
 - `sector_relative_rank_delta`
 - `sector_relative_factor_scores`
 - `sector_relative_notes`
+- `sector_relative_peer_source`
+- `sector_relative_peer_count`
+
+`sector_relative_peer_source` can be:
+
+- `sector`: same-sector peers were used.
+- `universe_fallback`: same-sector peer count was below the threshold, so the full candidate universe was used.
+- `missing_sector`: sector metadata was missing, so the full candidate universe was used.
+- `missing_record`: source record was unavailable.
+
+`sector_relative_peer_count` is the number of records used for the percentile comparison. In universe fallback cases, this is the full candidate universe count.
 
 `sector_relative_factor_scores` can include:
 

@@ -571,6 +571,8 @@ Stop mode 不是每日買賣訊號，而是低頻審查。
 - `sector_relative_rank_delta`
 - `sector_relative_factor_scores`
 - `sector_relative_notes`
+- `sector_relative_peer_source`
+- `sector_relative_peer_count`
 - `sector_aware_preview_available_count`
 - `sector_aware_preview_missing_count`
 - `sector_aware_preview_coverage`
@@ -584,6 +586,12 @@ Stop mode 不是每日買賣訊號，而是低頻審查。
 - `sector_aware_top_movers_up`
 - `sector_aware_top_movers_down`
 - `sector_aware_largest_movers`
+- `sector_aware_sector_peer_used_count`
+- `sector_aware_universe_fallback_count`
+- `sector_aware_missing_sector_count`
+- `sector_aware_average_peer_count`
+- `sector_aware_min_peer_count`
+- `sector_aware_max_peer_count`
 
 這一層只用來觀察：
 
@@ -610,6 +618,19 @@ official top 10 vs preview top 10 overlap
 large rank movement count
 largest movers with factor explanation
 ```
+
+Phase 2C.6 又補上 peer provenance diagnostics：
+
+```text
+sector peer used count
+universe fallback count
+missing sector count
+average / min / max peer count
+candidate peer source
+candidate peer count
+```
+
+這能判斷 sector-aware preview 是否真的使用同產業同儕，或只是因同產業樣本不足而 fallback 到全市場。
 
 這些欄位用來判斷是否可以進入 Phase 2D，而不是直接切換正式模型。
 

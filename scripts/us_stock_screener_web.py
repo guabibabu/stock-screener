@@ -142,6 +142,9 @@ def parse_uploaded_content(filename: str, content: str) -> Tuple[str, List[Any]]
 def _result_to_payload(item: Any) -> Dict[str, Any]:
     return {
         "ticker": item.ticker,
+        "company_name": item.record.company_name if item.record is not None else None,
+        "sector": item.record.sector if item.record is not None else None,
+        "industry": item.record.industry if item.record is not None else None,
         "strategy_mode": item.strategy_mode,
         "total_score": item.total_score,
         "raw_score": item.raw_score,
@@ -173,6 +176,8 @@ def _result_to_payload(item: Any) -> Dict[str, Any]:
         "sector_relative_rank_delta": item.sector_relative_rank_delta,
         "sector_relative_notes": item.sector_relative_notes,
         "sector_relative_factor_scores": item.sector_relative_factor_scores,
+        "sector_relative_peer_source": item.sector_relative_peer_source,
+        "sector_relative_peer_count": item.sector_relative_peer_count,
     }
 
 
@@ -216,6 +221,12 @@ def _report_to_payload(report: Any, *, source_name: str, bundle: Any = None) -> 
         "sector_aware_score_correlation_with_current": report.sector_aware_score_correlation_with_current,
         "sector_aware_top_10_overlap": report.sector_aware_top_10_overlap,
         "sector_aware_top_10_overlap_total": report.sector_aware_top_10_overlap_total,
+        "sector_aware_sector_peer_used_count": report.sector_aware_sector_peer_used_count,
+        "sector_aware_universe_fallback_count": report.sector_aware_universe_fallback_count,
+        "sector_aware_missing_sector_count": report.sector_aware_missing_sector_count,
+        "sector_aware_average_peer_count": report.sector_aware_average_peer_count,
+        "sector_aware_min_peer_count": report.sector_aware_min_peer_count,
+        "sector_aware_max_peer_count": report.sector_aware_max_peer_count,
         "sector_aware_large_rank_change_count": report.sector_aware_large_rank_change_count,
         "sector_aware_large_rank_change_threshold": report.sector_aware_large_rank_change_threshold,
         "sector_aware_largest_movers": report.sector_aware_largest_movers,
@@ -567,6 +578,16 @@ INDEX_HTML = r"""<!doctype html>
       return rank ? `${score} (${scoreDelta}), ${rank} (${rankDelta})` : `${score} (${scoreDelta})`;
     }
 
+    function formatPeerSource(item) {
+      if (item.sector_relative_peer_source === 'sector') {
+        return item.sector ? `${item.sector} sector` : 'Sector peers';
+      }
+      if (item.sector_relative_peer_source === 'universe_fallback') return 'Universe fallback';
+      if (item.sector_relative_peer_source === 'missing_sector') return 'Universe fallback (missing sector)';
+      if (item.sector_relative_peer_source === 'missing_record') return 'N/A';
+      return '';
+    }
+
     function render(report) {
       setMetric('mUniverse', report.universe_size);
       setMetric('mCandidates', report.candidate_count);
@@ -635,6 +656,12 @@ INDEX_HTML = r"""<!doctype html>
         `sector_aware_preview_coverage：${report.sector_aware_preview_coverage}`,
         `sector_aware_score_correlation_with_current：${report.sector_aware_score_correlation_with_current}`,
         `sector_aware_top_10_overlap：${report.sector_aware_top_10_overlap} / ${report.sector_aware_top_10_overlap_total}`,
+        `sector_aware_sector_peer_used_count：${report.sector_aware_sector_peer_used_count}`,
+        `sector_aware_universe_fallback_count：${report.sector_aware_universe_fallback_count}`,
+        `sector_aware_missing_sector_count：${report.sector_aware_missing_sector_count}`,
+        `sector_aware_average_peer_count：${report.sector_aware_average_peer_count}`,
+        `sector_aware_min_peer_count：${report.sector_aware_min_peer_count}`,
+        `sector_aware_max_peer_count：${report.sector_aware_max_peer_count}`,
         `sector_aware_large_rank_change_count：${report.sector_aware_large_rank_change_count}（threshold ${report.sector_aware_large_rank_change_threshold}）`,
       ];
       if (report.sector_aware_top_movers_up && report.sector_aware_top_movers_up.length) {
@@ -651,6 +678,8 @@ INDEX_HTML = r"""<!doctype html>
         lines.push(`${index + 1}. ${item.ticker}`);
         lines.push(`   總分：${item.total_score}`);
         lines.push(`   Sector-aware preview：${formatSectorPreview(item) || 'N/A'}`);
+        lines.push(`   Peer source：${formatPeerSource(item) || 'N/A'}`);
+        lines.push(`   Peer count：${item.sector_relative_peer_count ?? 'N/A'}`);
         if (item.suggested_action) lines.push(`   動作：${item.suggested_action}`);
         if (item.confidence_score !== null && item.confidence_score !== undefined) {
           lines.push(`   信心：${item.confidence_label || 'N/A'} (${item.confidence_score})`);
@@ -732,6 +761,8 @@ INDEX_HTML = r"""<!doctype html>
         `動作限制：${item.action_cap_reason || '無'}`,
         `最終分：${item.final_score}`,
         `Sector-aware preview：${formatSectorPreview(item) || 'N/A'}`,
+        `Peer source：${formatPeerSource(item) || 'N/A'}`,
+        `Peer count：${item.sector_relative_peer_count ?? 'N/A'}`,
         `Sector-aware factors：${item.sector_relative_factor_scores ? Object.entries(item.sector_relative_factor_scores).map(([key, value]) => `${key}=${value}`).join('；') : 'N/A'}`,
         '',
         '入選理由：',

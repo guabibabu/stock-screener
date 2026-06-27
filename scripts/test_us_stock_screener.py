@@ -202,6 +202,60 @@ class ScreenerTests(unittest.TestCase):
         notes = "；".join(report.candidates[0].sector_relative_notes)
         self.assertIn("used universe fallback", notes)
 
+    def test_sector_preview_reports_sector_peer_source(self) -> None:
+        records = [
+            self._sector_preview_record(f"TECH{index:02d}", revenue_growth_yoy=index, eps_growth_yoy=index)
+            for index in range(screener.SECTOR_RELATIVE_MIN_PEERS)
+        ]
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=40)
+        target = next(item for item in report.candidates if item.ticker == "TECH29")
+        self.assertEqual(target.sector_relative_peer_source, "sector")
+        self.assertEqual(target.sector_relative_peer_count, screener.SECTOR_RELATIVE_MIN_PEERS)
+        self.assertEqual(screener._format_sector_relative_peer_source(target), "Technology sector")
+
+    def test_sector_preview_reports_universe_fallback_source(self) -> None:
+        records = [
+            self._sector_preview_record("SMALL1", sector="Industrials"),
+            self._sector_preview_record("SMALL2", sector="Industrials", revenue_growth_yoy=20),
+            self._sector_preview_record("SMALL3", sector="Energy", revenue_growth_yoy=30),
+        ]
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=3)
+        target = next(item for item in report.candidates if item.ticker == "SMALL1")
+        self.assertEqual(target.sector_relative_peer_source, "universe_fallback")
+        self.assertEqual(screener._format_sector_relative_peer_source(target), "Universe fallback")
+
+    def test_sector_preview_reports_peer_count(self) -> None:
+        records = [
+            self._sector_preview_record("SMALL1", sector="Industrials"),
+            self._sector_preview_record("SMALL2", sector="Industrials"),
+            self._sector_preview_record("TECH1", sector="Technology"),
+            self._sector_preview_record("ENER1", sector="Energy"),
+        ]
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=4)
+        target = next(item for item in report.candidates if item.ticker == "SMALL1")
+        self.assertEqual(target.sector_relative_peer_source, "universe_fallback")
+        self.assertEqual(target.sector_relative_peer_count, 4)
+
+    def test_sector_summary_counts_peer_sources(self) -> None:
+        records = [
+            self._sector_preview_record(f"TECH{index:02d}", sector="Technology")
+            for index in range(screener.SECTOR_RELATIVE_MIN_PEERS)
+        ]
+        records.extend(
+            [
+                self._sector_preview_record("SMALL1", sector="Industrials"),
+                self._sector_preview_record("SMALL2", sector="Industrials"),
+                self._sector_preview_record("NOSECTOR", sector=""),
+            ]
+        )
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=40)
+        self.assertEqual(report.sector_aware_sector_peer_used_count, screener.SECTOR_RELATIVE_MIN_PEERS)
+        self.assertEqual(report.sector_aware_universe_fallback_count, 2)
+        self.assertEqual(report.sector_aware_missing_sector_count, 1)
+        self.assertIsNotNone(report.sector_aware_average_peer_count)
+        self.assertEqual(report.sector_aware_min_peer_count, screener.SECTOR_RELATIVE_MIN_PEERS)
+        self.assertEqual(report.sector_aware_max_peer_count, len(records))
+
     def test_sector_relative_higher_is_better_factor(self) -> None:
         records = [
             self._sector_preview_record("LOWG", revenue_growth_yoy=1, eps_growth_yoy=1),
@@ -346,8 +400,13 @@ class ScreenerTests(unittest.TestCase):
         report = run_screen_request(payload)
         self.assertTrue(report["sector_aware_shadow_mode"])
         self.assertIn("sector_aware_preview_available_count", report)
+        self.assertIn("sector_aware_sector_peer_used_count", report)
+        self.assertIn("sector_aware_universe_fallback_count", report)
+        self.assertIn("sector_aware_missing_sector_count", report)
         self.assertIn("sector_relative_score_preview", report["candidates"][0])
         self.assertIn("sector_relative_factor_scores", report["candidates"][0])
+        self.assertIn("sector_relative_peer_source", report["candidates"][0])
+        self.assertIn("sector_relative_peer_count", report["candidates"][0])
 
     def test_sector_relative_preview_coverage_and_correlation(self) -> None:
         records = [
@@ -371,6 +430,18 @@ class ScreenerTests(unittest.TestCase):
         self.assertGreaterEqual(report.sector_aware_top_10_overlap or 0, 0)
         self.assertLessEqual(report.sector_aware_top_10_overlap or 0, report.sector_aware_top_10_overlap_total)
         self.assertEqual(report.sector_aware_top_10_overlap_total, 10)
+
+    def test_top_10_overlap_formats_as_n_over_total(self) -> None:
+        records = [
+            self._sector_preview_record(f"OVL{index:02d}", revenue_growth_yoy=index, eps_growth_yoy=index)
+            for index in range(3)
+        ]
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=3)
+        markdown = screener._render_markdown(report)
+        self.assertIn(
+            f"sector_aware_top_10_overlap：{report.sector_aware_top_10_overlap} / {report.sector_aware_top_10_overlap_total}",
+            markdown,
+        )
 
     def test_sector_relative_large_rank_change_summary(self) -> None:
         candidates = []

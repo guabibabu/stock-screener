@@ -26,7 +26,13 @@ from fetch_yfinance_snapshot import (  # noqa: E402
     load_watchlist,
     save_snapshot,
 )
-from us_stock_screener import ScreenConfig, _format_sector_relative_preview, build_report, load_records  # noqa: E402
+from us_stock_screener import (  # noqa: E402
+    ScreenConfig,
+    _format_sector_relative_peer_source,
+    _format_sector_relative_preview,
+    build_report,
+    load_records,
+)
 
 
 class ScreenerApp(tk.Tk):
@@ -1239,6 +1245,8 @@ class ScreenerApp(tk.Tk):
             f"動作限制：{item.action_cap_reason or '無'}",
             f"最終分：{item.final_score}",
             f"Sector-aware preview：{_format_sector_relative_preview(item) or 'N/A'}",
+            f"Peer source：{_format_sector_relative_peer_source(item) or 'N/A'}",
+            f"Peer count：{item.sector_relative_peer_count if item.sector_relative_peer_count is not None else 'N/A'}",
             f"基本面：{item.factor_scores.get('fundamental')}",
             f"動量：{item.factor_scores.get('momentum')}",
             f"風險安全：{item.factor_scores.get('risk_safety')}",
@@ -1336,6 +1344,12 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
         f"sector_aware_preview_coverage：{report.sector_aware_preview_coverage}",
         f"sector_aware_score_correlation_with_current：{report.sector_aware_score_correlation_with_current}",
         f"sector_aware_top_10_overlap：{report.sector_aware_top_10_overlap} / {report.sector_aware_top_10_overlap_total}",
+        f"sector_aware_sector_peer_used_count：{report.sector_aware_sector_peer_used_count}",
+        f"sector_aware_universe_fallback_count：{report.sector_aware_universe_fallback_count}",
+        f"sector_aware_missing_sector_count：{report.sector_aware_missing_sector_count}",
+        f"sector_aware_average_peer_count：{report.sector_aware_average_peer_count}",
+        f"sector_aware_min_peer_count：{report.sector_aware_min_peer_count}",
+        f"sector_aware_max_peer_count：{report.sector_aware_max_peer_count}",
         f"sector_aware_large_rank_change_count：{report.sector_aware_large_rank_change_count}（threshold {report.sector_aware_large_rank_change_threshold}）",
     ]
     if report.sector_aware_top_movers_up:
@@ -1372,6 +1386,8 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
         lines.append(f"{index}. {item.ticker}")
         lines.append(f"   總分：{item.total_score}")
         lines.append(f"   Sector-aware preview：{_format_sector_relative_preview(item) or 'N/A'}")
+        lines.append(f"   Peer source：{_format_sector_relative_peer_source(item) or 'N/A'}")
+        lines.append(f"   Peer count：{item.sector_relative_peer_count if item.sector_relative_peer_count is not None else 'N/A'}")
         if item.suggested_action:
             lines.append(f"   動作：{item.suggested_action}")
         if item.confidence_score is not None:

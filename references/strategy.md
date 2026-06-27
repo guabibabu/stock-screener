@@ -211,6 +211,8 @@ Candidate-level preview fields:
 - `sector_relative_rank_delta`
 - `sector_relative_factor_scores`
 - `sector_relative_notes`
+- `sector_relative_peer_source`
+- `sector_relative_peer_count`
 
 Report-level preview fields:
 
@@ -228,6 +230,12 @@ Report-level preview fields:
 - `sector_aware_top_movers_up`
 - `sector_aware_top_movers_down`
 - `sector_aware_largest_movers`
+- `sector_aware_sector_peer_used_count`
+- `sector_aware_universe_fallback_count`
+- `sector_aware_missing_sector_count`
+- `sector_aware_average_peer_count`
+- `sector_aware_min_peer_count`
+- `sector_aware_max_peer_count`
 
 Phase 2C.5 diagnostics:
 
@@ -236,6 +244,15 @@ Phase 2C.5 diagnostics:
 - `sector_aware_top_10_overlap`: overlap count between official top 10 and preview top 10.
 - `sector_aware_large_rank_change_count`: count of names whose preview rank moved by at least the configured threshold.
 - `sector_aware_largest_movers`: largest rank movers with preview factor breakdown and notes.
+
+Phase 2C.6 peer provenance diagnostics:
+
+- `sector_relative_peer_source`: `sector`, `universe_fallback`, `missing_sector`, or `missing_record`.
+- `sector_relative_peer_count`: number of records used for the percentile comparison. Universe fallback uses the full displayed candidate universe count.
+- `sector_aware_sector_peer_used_count`: candidates whose preview used same-sector peers.
+- `sector_aware_universe_fallback_count`: candidates with a sector, but too few same-sector peers, so preview fell back to the universe.
+- `sector_aware_missing_sector_count`: candidates with missing sector metadata.
+- `sector_aware_average_peer_count`, `sector_aware_min_peer_count`, and `sector_aware_max_peer_count`: peer-count distribution for available preview scores.
 
 Initial preview factors:
 
@@ -246,6 +263,7 @@ Peer selection:
 
 - Use same-sector percentile when sector peer count is at least 30.
 - Otherwise fall back to the full candidate universe.
+- Reports show the peer source and peer count so users can tell whether the preview is truly sector-relative or mostly universe fallback.
 - Missing fields are ignored and reweighted inside the preview; they are reported in `sector_relative_notes`.
 
 ## Tuning Knobs

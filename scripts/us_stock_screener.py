@@ -756,6 +756,8 @@ class ScreenResult:
     sector_relative_rank_delta: Optional[int] = None
     sector_relative_notes: List[str] = field(default_factory=list)
     sector_relative_factor_scores: Dict[str, Optional[float]] = field(default_factory=dict)
+    sector_relative_peer_source: Optional[str] = None
+    sector_relative_peer_count: Optional[int] = None
 
     @property
     def is_candidate(self) -> bool:
@@ -807,6 +809,12 @@ class ScreeningReport:
     sector_aware_large_rank_change_count: int = 0
     sector_aware_large_rank_change_threshold: int = SECTOR_RELATIVE_LARGE_RANK_CHANGE_THRESHOLD
     sector_aware_largest_movers: List[Dict[str, Any]] = field(default_factory=list)
+    sector_aware_sector_peer_used_count: int = 0
+    sector_aware_universe_fallback_count: int = 0
+    sector_aware_missing_sector_count: int = 0
+    sector_aware_average_peer_count: Optional[float] = None
+    sector_aware_min_peer_count: Optional[int] = None
+    sector_aware_max_peer_count: Optional[int] = None
 
 
 def _canonicalize_record(payload: Dict[str, Any]) -> StockRecord:
@@ -2194,17 +2202,26 @@ def _sector_relative_field_value(record: StockRecord, field_name: str) -> Option
     return number
 
 
-def _sector_relative_peer_records(item: ScreenResult, candidates: Sequence[ScreenResult]) -> Tuple[List[StockRecord], str, int]:
+def _sector_relative_peer_provenance(item: ScreenResult, candidates: Sequence[ScreenResult]) -> Tuple[str, int, int]:
     universe_records = [candidate.record for candidate in candidates if candidate.record is not None]
     if item.record is None:
-        return universe_records, "missing_record", 0
+        return "missing_record", 0, 0
     sector = (item.record.sector or "").strip()
     if not sector:
-        return universe_records, "missing_sector", 0
+        return "missing_sector", len(universe_records), 0
     sector_records = [record for record in universe_records if (record.sector or "").strip() == sector]
     if len(sector_records) >= SECTOR_RELATIVE_MIN_PEERS:
-        return sector_records, "sector", len(sector_records)
-    return universe_records, "universe_fallback", len(sector_records)
+        return "sector", len(sector_records), len(sector_records)
+    return "universe_fallback", len(universe_records), len(sector_records)
+
+
+def _sector_relative_peer_records(item: ScreenResult, candidates: Sequence[ScreenResult]) -> Tuple[List[StockRecord], str, int]:
+    universe_records = [candidate.record for candidate in candidates if candidate.record is not None]
+    peer_source, _peer_count, sector_count = _sector_relative_peer_provenance(item, candidates)
+    if peer_source == "sector" and item.record is not None:
+        sector = (item.record.sector or "").strip()
+        return [record for record in universe_records if (record.sector or "").strip() == sector], peer_source, sector_count
+    return universe_records, peer_source, sector_count
 
 
 def _sector_relative_factor_score(
@@ -2303,6 +2320,8 @@ def _sector_relative_mover(item: ScreenResult) -> Dict[str, Any]:
         "preview_rank": item.sector_relative_rank_preview,
         "factor_scores": item.sector_relative_factor_scores,
         "notes": item.sector_relative_notes[:5],
+        "peer_source": item.sector_relative_peer_source,
+        "peer_count": item.sector_relative_peer_count,
     }
 
 
@@ -2326,6 +2345,9 @@ def apply_sector_relative_preview(candidates: Sequence[ScreenResult], strategy_m
     strategy_mode = _normalize_strategy_mode(strategy_mode)
     current_ranks = {item.ticker: index for index, item in enumerate(candidates, start=1)}
     for item in candidates:
+        peer_source, peer_count, _sector_count = _sector_relative_peer_provenance(item, candidates)
+        item.sector_relative_peer_source = peer_source
+        item.sector_relative_peer_count = peer_count
         preview_score, factor_scores, notes = _sector_relative_scores_for_candidate(item, candidates, strategy_mode)
         item.sector_relative_score_preview = preview_score
         item.sector_relative_factor_scores = factor_scores
@@ -2381,6 +2403,7 @@ def apply_sector_relative_preview(candidates: Sequence[ScreenResult], strategy_m
         [item for item in ranked_preview if (item.sector_relative_rank_delta or 0) < 0],
         key=lambda item: ((item.sector_relative_rank_delta or 0), item.ticker),
     )
+    peer_counts = [item.sector_relative_peer_count for item in ranked_preview if item.sector_relative_peer_count is not None]
     return {
         "sector_aware_shadow_mode": True,
         "sector_aware_preview_available_count": len(ranked_preview),
@@ -2396,6 +2419,12 @@ def apply_sector_relative_preview(candidates: Sequence[ScreenResult], strategy_m
         "sector_aware_large_rank_change_count": len(large_rank_changes),
         "sector_aware_large_rank_change_threshold": SECTOR_RELATIVE_LARGE_RANK_CHANGE_THRESHOLD,
         "sector_aware_largest_movers": [_sector_relative_mover(item) for item in largest_movers[:10]],
+        "sector_aware_sector_peer_used_count": sum(1 for item in ranked_preview if item.sector_relative_peer_source == "sector"),
+        "sector_aware_universe_fallback_count": sum(1 for item in ranked_preview if item.sector_relative_peer_source == "universe_fallback"),
+        "sector_aware_missing_sector_count": sum(1 for item in ranked_preview if item.sector_relative_peer_source == "missing_sector"),
+        "sector_aware_average_peer_count": _safe_round(sum(peer_counts) / len(peer_counts)) if peer_counts else None,
+        "sector_aware_min_peer_count": min(peer_counts) if peer_counts else None,
+        "sector_aware_max_peer_count": max(peer_counts) if peer_counts else None,
     }
 
 
@@ -2410,6 +2439,20 @@ def _format_sector_relative_preview(item: ScreenResult) -> str:
     if rank_text and rank_delta_text:
         return f"{item.sector_relative_score_preview:.1f} ({delta_text}), {rank_text} ({rank_delta_text})"
     return f"{item.sector_relative_score_preview:.1f} ({delta_text})"
+
+
+def _format_sector_relative_peer_source(item: ScreenResult) -> str:
+    source = item.sector_relative_peer_source
+    if source == "sector":
+        sector = (item.record.sector or "").strip() if item.record is not None else ""
+        return f"{sector} sector" if sector else "Sector peers"
+    if source == "universe_fallback":
+        return "Universe fallback"
+    if source == "missing_sector":
+        return "Universe fallback (missing sector)"
+    if source == "missing_record":
+        return "N/A"
+    return ""
 
 
 def score_record(
@@ -2796,6 +2839,12 @@ def screen_records(
         sector_aware_large_rank_change_count=sector_relative_summary["sector_aware_large_rank_change_count"],
         sector_aware_large_rank_change_threshold=sector_relative_summary["sector_aware_large_rank_change_threshold"],
         sector_aware_largest_movers=sector_relative_summary["sector_aware_largest_movers"],
+        sector_aware_sector_peer_used_count=sector_relative_summary["sector_aware_sector_peer_used_count"],
+        sector_aware_universe_fallback_count=sector_relative_summary["sector_aware_universe_fallback_count"],
+        sector_aware_missing_sector_count=sector_relative_summary["sector_aware_missing_sector_count"],
+        sector_aware_average_peer_count=sector_relative_summary["sector_aware_average_peer_count"],
+        sector_aware_min_peer_count=sector_relative_summary["sector_aware_min_peer_count"],
+        sector_aware_max_peer_count=sector_relative_summary["sector_aware_max_peer_count"],
     )
 
 
@@ -2837,6 +2886,12 @@ def _render_markdown(report: ScreeningReport) -> str:
     lines.append(f"- sector_aware_preview_coverage：{report.sector_aware_preview_coverage}")
     lines.append(f"- sector_aware_score_correlation_with_current：{report.sector_aware_score_correlation_with_current}")
     lines.append(f"- sector_aware_top_10_overlap：{report.sector_aware_top_10_overlap} / {report.sector_aware_top_10_overlap_total}")
+    lines.append(f"- sector_aware_sector_peer_used_count：{report.sector_aware_sector_peer_used_count}")
+    lines.append(f"- sector_aware_universe_fallback_count：{report.sector_aware_universe_fallback_count}")
+    lines.append(f"- sector_aware_missing_sector_count：{report.sector_aware_missing_sector_count}")
+    lines.append(f"- sector_aware_average_peer_count：{report.sector_aware_average_peer_count}")
+    lines.append(f"- sector_aware_min_peer_count：{report.sector_aware_min_peer_count}")
+    lines.append(f"- sector_aware_max_peer_count：{report.sector_aware_max_peer_count}")
     lines.append(
         f"- sector_aware_large_rank_change_count：{report.sector_aware_large_rank_change_count}"
         f"（threshold {report.sector_aware_large_rank_change_threshold}）"
@@ -2864,17 +2919,19 @@ def _render_markdown(report: ScreeningReport) -> str:
     lines.append("")
     lines.append("## 候選名單")
     lines.append("")
-    lines.append("| 排名 | Ticker | 總分 | Sector-aware preview | 資料品質 | 動作 | 基本面 | 動量 | 風險安全 | 主要理由 | 風險警示 |")
-    lines.append("| --- | --- | ---: | --- | ---: | --- | ---: | ---: | ---: | --- | --- |")
+    lines.append("| 排名 | Ticker | 總分 | Sector-aware preview | Peer source | Peer count | 資料品質 | 動作 | 基本面 | 動量 | 風險安全 | 主要理由 | 風險警示 |")
+    lines.append("| --- | --- | ---: | --- | --- | ---: | ---: | --- | ---: | ---: | ---: | --- | --- |")
     for index, item in enumerate(report.candidates, start=1):
         warnings = "；".join(item.risk_warnings) if item.risk_warnings else "無"
         reasons = "；".join(item.reasons)
         lines.append(
-            "| {rank} | {ticker} | {total} | {sector_preview} | {data_quality} | {action} | {fundamental} | {momentum} | {risk} | {reasons} | {warnings} |".format(
+            "| {rank} | {ticker} | {total} | {sector_preview} | {peer_source} | {peer_count} | {data_quality} | {action} | {fundamental} | {momentum} | {risk} | {reasons} | {warnings} |".format(
                 rank=index,
                 ticker=item.ticker,
                 total=item.total_score if item.total_score is not None else "",
                 sector_preview=_format_sector_relative_preview(item),
+                peer_source=_format_sector_relative_peer_source(item),
+                peer_count=item.sector_relative_peer_count if item.sector_relative_peer_count is not None else "",
                 data_quality=item.data_quality_score if item.data_quality_score is not None else "",
                 action=item.suggested_action or "",
                 fundamental=item.factor_scores.get("fundamental") or "",
@@ -2965,6 +3022,12 @@ def _render_json(report: ScreeningReport) -> str:
         "sector_aware_score_correlation_with_current": report.sector_aware_score_correlation_with_current,
         "sector_aware_top_10_overlap": report.sector_aware_top_10_overlap,
         "sector_aware_top_10_overlap_total": report.sector_aware_top_10_overlap_total,
+        "sector_aware_sector_peer_used_count": report.sector_aware_sector_peer_used_count,
+        "sector_aware_universe_fallback_count": report.sector_aware_universe_fallback_count,
+        "sector_aware_missing_sector_count": report.sector_aware_missing_sector_count,
+        "sector_aware_average_peer_count": report.sector_aware_average_peer_count,
+        "sector_aware_min_peer_count": report.sector_aware_min_peer_count,
+        "sector_aware_max_peer_count": report.sector_aware_max_peer_count,
         "sector_aware_large_rank_change_count": report.sector_aware_large_rank_change_count,
         "sector_aware_large_rank_change_threshold": report.sector_aware_large_rank_change_threshold,
         "sector_aware_largest_movers": report.sector_aware_largest_movers,
@@ -3001,6 +3064,8 @@ def _render_json(report: ScreeningReport) -> str:
                 "sector_relative_rank_delta": item.sector_relative_rank_delta,
                 "sector_relative_notes": item.sector_relative_notes,
                 "sector_relative_factor_scores": item.sector_relative_factor_scores,
+                "sector_relative_peer_source": item.sector_relative_peer_source,
+                "sector_relative_peer_count": item.sector_relative_peer_count,
             }
             for item in report.candidates
         ],
