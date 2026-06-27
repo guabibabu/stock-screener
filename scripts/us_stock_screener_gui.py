@@ -26,7 +26,7 @@ from fetch_yfinance_snapshot import (  # noqa: E402
     load_watchlist,
     save_snapshot,
 )
-from us_stock_screener import ScreenConfig, build_report, load_records  # noqa: E402
+from us_stock_screener import ScreenConfig, _format_sector_relative_preview, build_report, load_records  # noqa: E402
 
 
 class ScreenerApp(tk.Tk):
@@ -544,7 +544,7 @@ class ScreenerApp(tk.Tk):
         table_frame.rowconfigure(0, weight=1)
         table_frame.columnconfigure(0, weight=1)
 
-        columns = ("rank", "ticker", "score", "reasons", "risk")
+        columns = ("rank", "ticker", "score", "sector_preview", "reasons", "risk")
         self.tree = ttk.Treeview(
             table_frame,
             columns=columns,
@@ -555,12 +555,14 @@ class ScreenerApp(tk.Tk):
         self.tree.heading("rank", text="排名")
         self.tree.heading("ticker", text="Ticker")
         self.tree.heading("score", text="總分")
+        self.tree.heading("sector_preview", text="Sector Preview")
         self.tree.heading("reasons", text="入選理由")
         self.tree.heading("risk", text="風險提醒")
         self.tree.column("rank", width=70, anchor="center")
         self.tree.column("ticker", width=90, anchor="center")
         self.tree.column("score", width=90, anchor="center")
-        self.tree.column("reasons", width=520, anchor="w")
+        self.tree.column("sector_preview", width=190, anchor="center")
+        self.tree.column("reasons", width=440, anchor="w")
         self.tree.column("risk", width=260, anchor="w")
         self.tree.grid(row=0, column=0, sticky="nsew")
         tree_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
@@ -1118,6 +1120,7 @@ class ScreenerApp(tk.Tk):
                         index,
                         item.ticker,
                         item.total_score if item.total_score is not None else "",
+                        _format_sector_relative_preview(item),
                         reasons,
                         risk,
                     ),
@@ -1235,6 +1238,7 @@ class ScreenerApp(tk.Tk):
             f"資料品質：{item.data_quality_score if item.data_quality_score is not None else 'N/A'}",
             f"動作限制：{item.action_cap_reason or '無'}",
             f"最終分：{item.final_score}",
+            f"Sector-aware preview：{_format_sector_relative_preview(item) or 'N/A'}",
             f"基本面：{item.factor_scores.get('fundamental')}",
             f"動量：{item.factor_scores.get('momentum')}",
             f"風險安全：{item.factor_scores.get('risk_safety')}",
@@ -1264,6 +1268,16 @@ class ScreenerApp(tk.Tk):
             lines.append("")
             lines.append("正規化備註：")
             for note in item.normalization_notes:
+                lines.append(f"- {note}")
+        if item.sector_relative_factor_scores:
+            lines.append("")
+            lines.append("Sector-aware factor preview：")
+            for key, value in item.sector_relative_factor_scores.items():
+                lines.append(f"- {key}: {value}")
+        if item.sector_relative_notes:
+            lines.append("")
+            lines.append("Sector-aware notes：")
+            for note in item.sector_relative_notes:
                 lines.append(f"- {note}")
         self.detail_text.delete("1.0", tk.END)
         self.detail_text.insert(tk.END, "\n".join(lines))
@@ -1314,7 +1328,24 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
         f"high_volatility_candidate_count：{report.high_volatility_candidate_count}",
         f"deep_drawdown_candidate_count：{report.deep_drawdown_candidate_count}",
         f"missing_data_candidate_count：{report.missing_data_candidate_count}",
+        f"sector_aware_shadow_mode：{'啟用' if report.sector_aware_shadow_mode else '未啟用'}",
+        f"sector_aware_preview_available_count：{report.sector_aware_preview_available_count}",
+        f"sector_aware_preview_missing_count：{report.sector_aware_preview_missing_count}",
+        f"sector_aware_average_score_delta：{report.sector_aware_average_score_delta}",
+        f"sector_aware_rank_changed_count：{report.sector_aware_rank_changed_count}",
     ]
+    if report.sector_aware_top_movers_up:
+        movers = "；".join(
+            f"{item['ticker']} rank_delta {item.get('rank_delta')} score_delta {item.get('score_delta')}"
+            for item in report.sector_aware_top_movers_up
+        )
+        lines.append(f"sector_aware_top_movers_up：{movers}")
+    if report.sector_aware_top_movers_down:
+        movers = "；".join(
+            f"{item['ticker']} rank_delta {item.get('rank_delta')} score_delta {item.get('score_delta')}"
+            for item in report.sector_aware_top_movers_down
+        )
+        lines.append(f"sector_aware_top_movers_down：{movers}")
     if report.strategy_mode == "hybrid" and report.ranking_style == "momentum_driven":
         lines.append("診斷提醒：本次 hybrid 排名偏動量導向，適合作為候選初篩，不代表低風險或長期品質排序。")
     if bundle is not None:
@@ -1330,6 +1361,7 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
     for index, item in enumerate(report.candidates, start=1):
         lines.append(f"{index}. {item.ticker}")
         lines.append(f"   總分：{item.total_score}")
+        lines.append(f"   Sector-aware preview：{_format_sector_relative_preview(item) or 'N/A'}")
         if item.suggested_action:
             lines.append(f"   動作：{item.suggested_action}")
         if item.confidence_score is not None:
@@ -1351,6 +1383,14 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
             lines.append(f"   資料品質旗標：{'；'.join(item.data_quality_flags)}")
         if item.normalization_notes:
             lines.append(f"   正規化備註：{'；'.join(item.normalization_notes)}")
+        if item.sector_relative_factor_scores:
+            preview_parts = [
+                f"{key}={value}"
+                for key, value in item.sector_relative_factor_scores.items()
+            ]
+            lines.append(f"   Sector-aware factor preview：{'；'.join(preview_parts)}")
+        if item.sector_relative_notes:
+            lines.append(f"   Sector-aware notes：{'；'.join(item.sector_relative_notes)}")
         if item.penalties:
             penalty_text = "；".join(
                 f"{penalty.get('reason')} -{penalty.get('points')}分"

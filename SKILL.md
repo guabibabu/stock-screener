@@ -15,7 +15,7 @@ Canonical source: the installed skill at `~/.codex/skills/us-stock-screener/`. T
 4. Manual snapshot path: use `references/sample-universe.csv` if you already have price, market cap, and liquidity fields.
 5. Minimum required columns for the screener: `ticker`, `price`, `market_cap`, `avg_dollar_volume_20d` or `avg_volume_20d`.
 6. Strategy modes: `hybrid` for the default mixed ranking model, or `stop_checking_price` for the low-frequency quality screen.
-7. Default output: ranked candidates, total score, factor scores, reasons, risk warnings, confidence notes, and a clear exclusion list.
+7. Default output: ranked candidates, total score, sector-aware preview, factor scores, reasons, risk warnings, confidence notes, and a clear exclusion list.
 8. If data is missing, the screener names the missing fields and lowers confidence instead of guessing.
 
 ## What Each File Does
@@ -42,6 +42,7 @@ Canonical source: the installed skill at `~/.codex/skills/us-stock-screener/`. T
 ## Outputs
 
 - Candidate list ordered by total score.
+- Sector-aware preview fields for diagnostics only; these do not change the official ranking or action label.
 - Factor breakdown: fundamental, growth, quality, valuation, momentum, risk, liquidity, and confidence when available.
 - Reason bullets in Chinese.
 - Risk warnings for volatility, leverage, drawdown, stale data, and missing fundamentals.

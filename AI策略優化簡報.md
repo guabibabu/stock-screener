@@ -561,6 +561,39 @@ Stop mode 不是每日買賣訊號，而是低頻審查。
 
 請注意：這些函式目前只是工具層，正式 hybrid / stop mode 排名尚未改成 percentile scoring。
 
+## 17.2 目前已完成的 Phase 2C sector-aware shadow mode
+
+目前已新增 sector-aware preview，但尚未接入正式分數：
+
+- `sector_relative_score_preview`
+- `sector_relative_rank_preview`
+- `sector_relative_score_delta`
+- `sector_relative_rank_delta`
+- `sector_relative_factor_scores`
+- `sector_relative_notes`
+- `sector_aware_preview_available_count`
+- `sector_aware_preview_missing_count`
+- `sector_aware_average_score_delta`
+- `sector_aware_rank_changed_count`
+- `sector_aware_top_movers_up`
+- `sector_aware_top_movers_down`
+
+這一層只用來觀察：
+
+```text
+如果用同產業 percentile scoring，候選股分數與排名會怎麼變？
+```
+
+目前不會改變：
+
+- 正式 `total_score`
+- 正式候選排序
+- `suggested_action`
+- hard filters
+- soft penalties
+
+初版 preview 使用同 sector peers；若同產業候選數少於 30，fallback 到全候選 universe。缺欄位不直接扣分，只在 preview 內忽略並寫入 notes。
+
 ## 18. 對策略優化的約束
 
 請勿建議：

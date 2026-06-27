@@ -167,6 +167,12 @@ def _result_to_payload(item: Any) -> Dict[str, Any]:
         "company_snapshot": item.company_snapshot,
         "excluded_reason": item.excluded_reason,
         "exclusion_details": item.exclusion_details,
+        "sector_relative_score_preview": item.sector_relative_score_preview,
+        "sector_relative_rank_preview": item.sector_relative_rank_preview,
+        "sector_relative_score_delta": item.sector_relative_score_delta,
+        "sector_relative_rank_delta": item.sector_relative_rank_delta,
+        "sector_relative_notes": item.sector_relative_notes,
+        "sector_relative_factor_scores": item.sector_relative_factor_scores,
     }
 
 
@@ -199,6 +205,13 @@ def _report_to_payload(report: Any, *, source_name: str, bundle: Any = None) -> 
         "high_volatility_candidate_count": report.high_volatility_candidate_count,
         "deep_drawdown_candidate_count": report.deep_drawdown_candidate_count,
         "missing_data_candidate_count": report.missing_data_candidate_count,
+        "sector_aware_shadow_mode": report.sector_aware_shadow_mode,
+        "sector_aware_preview_available_count": report.sector_aware_preview_available_count,
+        "sector_aware_preview_missing_count": report.sector_aware_preview_missing_count,
+        "sector_aware_average_score_delta": report.sector_aware_average_score_delta,
+        "sector_aware_rank_changed_count": report.sector_aware_rank_changed_count,
+        "sector_aware_top_movers_up": report.sector_aware_top_movers_up,
+        "sector_aware_top_movers_down": report.sector_aware_top_movers_down,
         "snapshot": None
         if bundle is None
         else {
@@ -439,6 +452,7 @@ INDEX_HTML = r"""<!doctype html>
                 <th>排名</th>
                 <th>Ticker</th>
                 <th>總分</th>
+                <th>Sector Preview</th>
                 <th>動作</th>
                 <th>入選理由</th>
                 <th>風險提醒</th>
@@ -533,6 +547,19 @@ INDEX_HTML = r"""<!doctype html>
 
     function setMetric(id, value) { $(id).textContent = value ?? 0; }
 
+    function formatSectorPreview(item) {
+      if (item.sector_relative_score_preview === null || item.sector_relative_score_preview === undefined) return '';
+      const score = Number(item.sector_relative_score_preview).toFixed(1);
+      const scoreDelta = item.sector_relative_score_delta === null || item.sector_relative_score_delta === undefined
+        ? ''
+        : `${item.sector_relative_score_delta >= 0 ? '+' : ''}${Number(item.sector_relative_score_delta).toFixed(1)}`;
+      const rank = item.sector_relative_rank_preview ? `rank #${item.sector_relative_rank_preview}` : '';
+      const rankDelta = item.sector_relative_rank_delta === null || item.sector_relative_rank_delta === undefined
+        ? ''
+        : `${item.sector_relative_rank_delta >= 0 ? '+' : ''}${item.sector_relative_rank_delta}`;
+      return rank ? `${score} (${scoreDelta}), ${rank} (${rankDelta})` : `${score} (${scoreDelta})`;
+    }
+
     function render(report) {
       setMetric('mUniverse', report.universe_size);
       setMetric('mCandidates', report.candidate_count);
@@ -545,7 +572,7 @@ INDEX_HTML = r"""<!doctype html>
       const body = $('rows');
       body.innerHTML = '';
       if (!report.candidates.length) {
-        body.innerHTML = '<tr><td colspan="6" class="empty">沒有符合條件的候選股票。</td></tr>';
+        body.innerHTML = '<tr><td colspan="7" class="empty">沒有符合條件的候選股票。</td></tr>';
       } else {
         report.candidates.forEach((item, index) => {
           const tr = document.createElement('tr');
@@ -553,6 +580,7 @@ INDEX_HTML = r"""<!doctype html>
             <td>${index + 1}</td>
             <td><strong>${item.ticker}</strong></td>
             <td class="score">${item.total_score ?? ''}</td>
+            <td>${formatSectorPreview(item)}</td>
             <td>${item.suggested_action || 'CANDIDATE'}</td>
             <td>${(item.reasons || []).slice(0, 2).join('；') || '等待審核'}</td>
             <td>${(item.risk_warnings || []).slice(0, 2).join('；') || '<span class="ok">無明顯風險</span>'}</td>
@@ -592,13 +620,23 @@ INDEX_HTML = r"""<!doctype html>
         `high_volatility_candidate_count：${report.high_volatility_candidate_count}`,
         `deep_drawdown_candidate_count：${report.deep_drawdown_candidate_count}`,
         `missing_data_candidate_count：${report.missing_data_candidate_count}`,
-        '',
-        '候選名單',
-        ''
+        `sector_aware_shadow_mode：${report.sector_aware_shadow_mode ? '啟用' : '未啟用'}`,
+        `sector_aware_preview_available_count：${report.sector_aware_preview_available_count}`,
+        `sector_aware_preview_missing_count：${report.sector_aware_preview_missing_count}`,
+        `sector_aware_average_score_delta：${report.sector_aware_average_score_delta}`,
+        `sector_aware_rank_changed_count：${report.sector_aware_rank_changed_count}`,
       ];
+      if (report.sector_aware_top_movers_up && report.sector_aware_top_movers_up.length) {
+        lines.push(`sector_aware_top_movers_up：${report.sector_aware_top_movers_up.map(item => `${item.ticker} rank_delta ${item.rank_delta} score_delta ${item.score_delta}`).join('；')}`);
+      }
+      if (report.sector_aware_top_movers_down && report.sector_aware_top_movers_down.length) {
+        lines.push(`sector_aware_top_movers_down：${report.sector_aware_top_movers_down.map(item => `${item.ticker} rank_delta ${item.rank_delta} score_delta ${item.score_delta}`).join('；')}`);
+      }
+      lines.push('', '候選名單', '');
       (report.candidates || []).forEach((item, index) => {
         lines.push(`${index + 1}. ${item.ticker}`);
         lines.push(`   總分：${item.total_score}`);
+        lines.push(`   Sector-aware preview：${formatSectorPreview(item) || 'N/A'}`);
         if (item.suggested_action) lines.push(`   動作：${item.suggested_action}`);
         if (item.confidence_score !== null && item.confidence_score !== undefined) {
           lines.push(`   信心：${item.confidence_label || 'N/A'} (${item.confidence_score})`);
@@ -615,6 +653,11 @@ INDEX_HTML = r"""<!doctype html>
         if (item.confidence_notes && item.confidence_notes.length) lines.push(`   提醒：${item.confidence_notes.join('；')}`);
         if (item.data_quality_flags && item.data_quality_flags.length) lines.push(`   資料品質旗標：${item.data_quality_flags.join('；')}`);
         if (item.normalization_notes && item.normalization_notes.length) lines.push(`   正規化備註：${item.normalization_notes.join('；')}`);
+        if (item.sector_relative_factor_scores) {
+          const factorText = Object.entries(item.sector_relative_factor_scores).map(([key, value]) => `${key}=${value}`).join('；');
+          lines.push(`   Sector-aware factor preview：${factorText}`);
+        }
+        if (item.sector_relative_notes && item.sector_relative_notes.length) lines.push(`   Sector-aware notes：${item.sector_relative_notes.join('；')}`);
         if (item.penalties && item.penalties.length) {
           const penaltyText = item.penalties.map(p => `${p.reason} -${p.points}分`).join('；');
           lines.push(`   扣分：${item.penalty_score}（${penaltyText}）`);
@@ -674,6 +717,8 @@ INDEX_HTML = r"""<!doctype html>
         `資料品質：${item.data_quality_score ?? 'N/A'}`,
         `動作限制：${item.action_cap_reason || '無'}`,
         `最終分：${item.final_score}`,
+        `Sector-aware preview：${formatSectorPreview(item) || 'N/A'}`,
+        `Sector-aware factors：${item.sector_relative_factor_scores ? Object.entries(item.sector_relative_factor_scores).map(([key, value]) => `${key}=${value}`).join('；') : 'N/A'}`,
         '',
         '入選理由：',
         ...((item.reasons || []).map(r => `- ${r}`)),
@@ -689,6 +734,9 @@ INDEX_HTML = r"""<!doctype html>
         '',
         '正規化備註：',
         ...((item.normalization_notes && item.normalization_notes.length ? item.normalization_notes : ['無']).map(r => `- ${r}`)),
+        '',
+        'Sector-aware notes：',
+        ...((item.sector_relative_notes && item.sector_relative_notes.length ? item.sector_relative_notes : ['無']).map(r => `- ${r}`)),
         '',
         '扣分明細：',
         penalties

@@ -63,6 +63,31 @@ class ScreenerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = ScreenConfig()
 
+    def _sector_preview_record(self, ticker: str, **overrides):
+        record = {
+            "ticker": ticker,
+            "sector": "Technology",
+            "price": 100,
+            "market_cap": 50_000_000_000,
+            "avg_dollar_volume_20d": 100_000_000,
+            "revenue_growth_yoy": 10,
+            "eps_growth_yoy": 10,
+            "gross_margin": 45,
+            "operating_margin": 20,
+            "return_on_equity": 15,
+            "pe_ratio": 25,
+            "ps_ratio": 6,
+            "relative_strength_252d": 70,
+            "price_vs_sma50_pct": 3,
+            "price_vs_sma200_pct": 6,
+            "beta": 1.0,
+            "volatility_63d": 25,
+            "max_drawdown_252d": 15,
+            "data_age_days": 2,
+        }
+        record.update(overrides)
+        return record
+
     def test_winsorize_value_clips_bounds(self) -> None:
         self.assertEqual(screener.winsorize_value(120, 0, 100), 100)
         self.assertEqual(screener.winsorize_value(-5, 0, 100), 0)
@@ -139,6 +164,190 @@ class ScreenerTests(unittest.TestCase):
         records = load_records(sample)
         self.assertEqual(len(records), 4)
         self.assertEqual(records[0].ticker, "AAPL")
+
+    def test_sector_relative_uses_sector_when_enough_peers(self) -> None:
+        records = [
+            self._sector_preview_record(
+                f"TECH{index:02d}",
+                revenue_growth_yoy=index,
+                eps_growth_yoy=index,
+                gross_margin=30 + index,
+                operating_margin=10 + index,
+                return_on_equity=5 + index,
+            )
+            for index in range(screener.SECTOR_RELATIVE_MIN_PEERS)
+        ]
+        records.extend(
+            [
+                self._sector_preview_record(
+                    f"ENER{index:02d}",
+                    sector="Energy",
+                    revenue_growth_yoy=100,
+                    eps_growth_yoy=100,
+                )
+                for index in range(5)
+            ]
+        )
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=40)
+        target = next(item for item in report.candidates if item.ticker == "TECH29")
+        self.assertIsNotNone(target.sector_relative_score_preview)
+        self.assertFalse(any("used universe fallback" in note for note in target.sector_relative_notes))
+
+    def test_sector_relative_falls_back_to_universe_when_sector_too_small(self) -> None:
+        records = [
+            self._sector_preview_record("SMALL1", sector="Industrials"),
+            self._sector_preview_record("SMALL2", sector="Industrials", revenue_growth_yoy=20),
+        ]
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=2)
+        notes = "；".join(report.candidates[0].sector_relative_notes)
+        self.assertIn("used universe fallback", notes)
+
+    def test_sector_relative_higher_is_better_factor(self) -> None:
+        records = [
+            self._sector_preview_record("LOWG", revenue_growth_yoy=1, eps_growth_yoy=1),
+            self._sector_preview_record("HIGHG", revenue_growth_yoy=30, eps_growth_yoy=30),
+        ]
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=2)
+        by_ticker = {item.ticker: item for item in report.candidates}
+        self.assertGreater(
+            by_ticker["HIGHG"].sector_relative_factor_scores["growth"] or 0,
+            by_ticker["LOWG"].sector_relative_factor_scores["growth"] or 0,
+        )
+
+    def test_sector_relative_lower_is_better_factor(self) -> None:
+        records = [
+            self._sector_preview_record("CHEAP", pe_ratio=10, ps_ratio=2),
+            self._sector_preview_record("EXPENSIVE", pe_ratio=80, ps_ratio=20),
+        ]
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=2)
+        by_ticker = {item.ticker: item for item in report.candidates}
+        self.assertGreater(
+            by_ticker["CHEAP"].sector_relative_factor_scores["valuation"] or 0,
+            by_ticker["EXPENSIVE"].sector_relative_factor_scores["valuation"] or 0,
+        )
+
+    def test_sector_relative_missing_factor_ignored(self) -> None:
+        records = [
+            self._sector_preview_record("PARTIAL", pe_ratio=None, ps_ratio=4),
+            self._sector_preview_record("FULL", pe_ratio=20, ps_ratio=8),
+        ]
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=2)
+        partial = next(item for item in report.candidates if item.ticker == "PARTIAL")
+        self.assertIsNotNone(partial.sector_relative_score_preview)
+        self.assertIsNotNone(partial.sector_relative_factor_scores["valuation"])
+        self.assertTrue(any("pe_ratio" in note for note in partial.sector_relative_notes))
+
+    def test_sector_relative_preview_does_not_change_total_score(self) -> None:
+        sample = SCRIPT_DIR.parent / "references" / "sample-universe.csv"
+        report = build_report(load_records(sample), self.config, strategy_mode="hybrid", top_n=4)
+        scores = {item.ticker: item.total_score for item in report.candidates}
+        self.assertEqual(scores["NVDA"], 76.5)
+        self.assertEqual(scores["MSFT"], 74.7)
+        self.assertEqual(scores["AAPL"], 66.5)
+
+    def test_sector_relative_preview_does_not_change_ranking(self) -> None:
+        sample = SCRIPT_DIR.parent / "references" / "sample-universe.csv"
+        report = build_report(load_records(sample), self.config, strategy_mode="hybrid", top_n=4)
+        self.assertEqual([item.ticker for item in report.candidates], ["NVDA", "MSFT", "AAPL"])
+
+    def test_sector_relative_preview_does_not_change_suggested_action(self) -> None:
+        sample = SCRIPT_DIR.parent / "references" / "sample-universe.csv"
+        report = build_report(load_records(sample), self.config, strategy_mode="hybrid", top_n=4)
+        self.assertEqual({item.suggested_action for item in report.candidates}, {"CANDIDATE"})
+
+    def test_sector_relative_rank_delta(self) -> None:
+        weak = screener.ScreenResult(
+            ticker="WEAK",
+            strategy_mode="hybrid",
+            total_score=90,
+            raw_score=90,
+            adjusted_score=90,
+            fundamental_score=90,
+            momentum_score=90,
+            risk_safety_score=90,
+            factor_scores={},
+            reasons=[],
+            risk_warnings=[],
+            confidence_notes=[],
+            record=screener.StockRecord(
+                ticker="WEAK",
+                sector="Technology",
+                revenue_growth_yoy=1,
+                eps_growth_yoy=1,
+                gross_margin=20,
+                operating_margin=5,
+                return_on_equity=3,
+                pe_ratio=80,
+                ps_ratio=20,
+                relative_strength_252d=20,
+                price_vs_sma200_pct=-10,
+                volatility_63d=80,
+                beta=2,
+                max_drawdown_252d=50,
+                avg_dollar_volume_20d=30_000_000,
+            ),
+        )
+        strong = screener.ScreenResult(
+            ticker="STRONG",
+            strategy_mode="hybrid",
+            total_score=80,
+            raw_score=80,
+            adjusted_score=80,
+            fundamental_score=80,
+            momentum_score=80,
+            risk_safety_score=80,
+            factor_scores={},
+            reasons=[],
+            risk_warnings=[],
+            confidence_notes=[],
+            record=screener.StockRecord(
+                ticker="STRONG",
+                sector="Technology",
+                revenue_growth_yoy=30,
+                eps_growth_yoy=30,
+                gross_margin=60,
+                operating_margin=35,
+                return_on_equity=25,
+                pe_ratio=12,
+                ps_ratio=3,
+                relative_strength_252d=90,
+                price_vs_sma200_pct=20,
+                volatility_63d=15,
+                beta=0.8,
+                max_drawdown_252d=8,
+                avg_dollar_volume_20d=300_000_000,
+            ),
+        )
+        screener.apply_sector_relative_preview([weak, strong], "hybrid")
+        self.assertEqual(strong.sector_relative_rank_preview, 1)
+        self.assertEqual(strong.sector_relative_rank_delta, 1)
+        self.assertEqual(weak.sector_relative_rank_delta, -1)
+
+    def test_sector_relative_score_delta(self) -> None:
+        records = [
+            self._sector_preview_record("LOW", revenue_growth_yoy=1, eps_growth_yoy=1),
+            self._sector_preview_record("HIGH", revenue_growth_yoy=30, eps_growth_yoy=30),
+        ]
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=2)
+        candidate = report.candidates[0]
+        self.assertIsNotNone(candidate.sector_relative_score_delta)
+        self.assertAlmostEqual(
+            candidate.sector_relative_score_delta or 0,
+            round((candidate.sector_relative_score_preview or 0) - (candidate.total_score or 0), 1),
+        )
+
+    def test_sector_relative_report_summary_and_web_payload(self) -> None:
+        payload = {
+            "source_mode": "sample_universe",
+            "strategy_mode": "hybrid",
+            "force_rebalance": False,
+            "auto_fetch": False,
+        }
+        report = run_screen_request(payload)
+        self.assertTrue(report["sector_aware_shadow_mode"])
+        self.assertIn("sector_aware_preview_available_count", report)
+        self.assertIn("sector_relative_score_preview", report["candidates"][0])
+        self.assertIn("sector_relative_factor_scores", report["candidates"][0])
 
     def test_sample_watchlist_loads(self) -> None:
         sample = SCRIPT_DIR.parent / "references" / "sample-watchlist.csv"

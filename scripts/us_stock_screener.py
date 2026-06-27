@@ -544,6 +544,33 @@ STOP_CHECKING_PRICE_DEDUPE_COMPANY_GROUPS = {
     "BRK.B": "BERKSHIRE_HATHAWAY",
 }
 
+SECTOR_RELATIVE_MIN_PEERS = 30
+SECTOR_RELATIVE_FACTOR_FIELDS = {
+    "growth": [
+        ("revenue_growth_yoy", "higher"),
+        ("eps_growth_yoy", "higher"),
+    ],
+    "quality": [
+        ("gross_margin", "higher"),
+        ("operating_margin", "higher"),
+        ("return_on_equity", "higher"),
+    ],
+    "valuation": [
+        ("pe_ratio", "lower"),
+        ("ps_ratio", "lower"),
+    ],
+    "momentum": [
+        ("relative_strength_252d", "higher"),
+        ("price_vs_sma200_pct", "higher"),
+    ],
+    "risk": [
+        ("volatility_63d", "lower"),
+        ("beta", "lower"),
+        ("max_drawdown_252d", "lower"),
+        ("avg_dollar_volume_20d", "higher"),
+    ],
+}
+
 MAX_STOP_CHECKING_PRICE_PENALTY = 25
 DEFAULT_MIN_SCORE_BY_MODE = {
     "hybrid": None,
@@ -722,6 +749,12 @@ class ScreenResult:
     data_quality_flags: List[str] = field(default_factory=list)
     normalization_notes: List[str] = field(default_factory=list)
     action_cap_reason: Optional[str] = None
+    sector_relative_score_preview: Optional[float] = None
+    sector_relative_rank_preview: Optional[int] = None
+    sector_relative_score_delta: Optional[float] = None
+    sector_relative_rank_delta: Optional[int] = None
+    sector_relative_notes: List[str] = field(default_factory=list)
+    sector_relative_factor_scores: Dict[str, Optional[float]] = field(default_factory=dict)
 
     @property
     def is_candidate(self) -> bool:
@@ -759,6 +792,13 @@ class ScreeningReport:
     high_volatility_candidate_count: int = 0
     deep_drawdown_candidate_count: int = 0
     missing_data_candidate_count: int = 0
+    sector_aware_shadow_mode: bool = True
+    sector_aware_preview_available_count: int = 0
+    sector_aware_preview_missing_count: int = 0
+    sector_aware_average_score_delta: Optional[float] = None
+    sector_aware_rank_changed_count: int = 0
+    sector_aware_top_movers_up: List[Dict[str, Any]] = field(default_factory=list)
+    sector_aware_top_movers_down: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def _canonicalize_record(payload: Dict[str, Any]) -> StockRecord:
@@ -2113,6 +2153,208 @@ def build_ranking_diagnostics(candidates: Sequence[ScreenResult]) -> Dict[str, A
     }
 
 
+def _sector_relative_field_value(record: StockRecord, field_name: str) -> Optional[float]:
+    if field_name == "avg_dollar_volume_20d":
+        return _valid_number(record.dollar_volume_20d)
+    if field_name == "gross_margin":
+        value = _pick({"gross_margin": record.gross_margin, "gross_margin_ttm": record.gross_margin_ttm}, "gross_margin", "gross_margin_ttm")
+    elif field_name == "operating_margin":
+        value = _pick(
+            {"operating_margin": record.operating_margin, "operating_margin_ttm": record.operating_margin_ttm},
+            "operating_margin",
+            "operating_margin_ttm",
+        )
+    elif field_name == "return_on_equity":
+        value = _pick({"return_on_equity": record.return_on_equity, "roe": record.roe}, "return_on_equity", "roe")
+    elif field_name == "volatility_63d":
+        value = _pick({"volatility_63d": record.volatility_63d, "volatility_1y": record.volatility_1y}, "volatility_63d", "volatility_1y")
+    elif field_name == "beta":
+        value = _pick({"beta": record.beta, "beta_1y": record.beta_1y}, "beta", "beta_1y")
+    elif field_name == "max_drawdown_252d":
+        value = _pick(
+            {"max_drawdown_252d": record.max_drawdown_252d, "max_drawdown_1y": record.max_drawdown_1y},
+            "max_drawdown_252d",
+            "max_drawdown_1y",
+        )
+    else:
+        value = _get_field_value(record, field_name)
+    number = _valid_number(value)
+    if number is None:
+        return None
+    if field_name.startswith("max_drawdown") and number < 0:
+        return abs(number)
+    return number
+
+
+def _sector_relative_peer_records(item: ScreenResult, candidates: Sequence[ScreenResult]) -> Tuple[List[StockRecord], str, int]:
+    universe_records = [candidate.record for candidate in candidates if candidate.record is not None]
+    if item.record is None:
+        return universe_records, "missing_record", 0
+    sector = (item.record.sector or "").strip()
+    if not sector:
+        return universe_records, "missing_sector", 0
+    sector_records = [record for record in universe_records if (record.sector or "").strip() == sector]
+    if len(sector_records) >= SECTOR_RELATIVE_MIN_PEERS:
+        return sector_records, "sector", len(sector_records)
+    return universe_records, "universe_fallback", len(sector_records)
+
+
+def _sector_relative_factor_score(
+    item: ScreenResult,
+    candidates: Sequence[ScreenResult],
+    field_name: str,
+    direction: str,
+) -> Tuple[Optional[float], List[str]]:
+    notes: List[str] = []
+    if item.record is None:
+        return None, ["missing record; sector-relative preview unavailable."]
+    value = _sector_relative_field_value(item.record, field_name)
+    if value is None:
+        return None, [f"missing sector-relative field: {field_name}"]
+    peer_records, peer_source, sector_count = _sector_relative_peer_records(item, candidates)
+    peer_values = [_sector_relative_field_value(record, field_name) for record in peer_records]
+    valid_peer_values = [number for number in peer_values if number is not None]
+    if not valid_peer_values:
+        return None, [f"no valid peer values for {field_name}"]
+    if peer_source == "missing_sector":
+        notes.append("missing sector; used universe fallback.")
+    elif peer_source == "universe_fallback":
+        notes.append(f"sector peer count {sector_count} < {SECTOR_RELATIVE_MIN_PEERS}; used universe fallback.")
+    if direction == "higher":
+        score = score_higher_is_better(value, valid_peer_values, missing_policy="ignore")
+    else:
+        score = score_lower_is_better(value, valid_peer_values, missing_policy="ignore")
+    return score, notes
+
+
+def _average_equal_scores(scores: Sequence[Optional[float]]) -> Optional[float]:
+    available = [score for score in scores if score is not None]
+    if not available:
+        return None
+    return sum(available) / len(available)
+
+
+def _sector_relative_scores_for_candidate(
+    item: ScreenResult,
+    candidates: Sequence[ScreenResult],
+    strategy_mode: str,
+) -> Tuple[Optional[float], Dict[str, Optional[float]], List[str]]:
+    notes: List[str] = []
+    note_seen = set()
+    group_scores: Dict[str, Optional[float]] = {}
+    for group_name, fields in SECTOR_RELATIVE_FACTOR_FIELDS.items():
+        field_scores: List[Optional[float]] = []
+        for field_name, direction in fields:
+            score, field_notes = _sector_relative_factor_score(item, candidates, field_name, direction)
+            field_scores.append(score)
+            for note in field_notes:
+                if note not in note_seen:
+                    note_seen.add(note)
+                    notes.append(note)
+        group_scores[group_name] = _safe_round(_average_equal_scores(field_scores))
+
+    fundamental = weighted_average_available(
+        {
+            "growth": group_scores["growth"],
+            "quality": group_scores["quality"],
+            "valuation": group_scores["valuation"],
+            "capital_efficiency": None,
+        },
+        FUNDAMENTAL_WEIGHTS[strategy_mode],
+    )
+    risk_safety = group_scores["risk"]
+    preview_score = weighted_average_available(
+        {
+            "fundamental": fundamental,
+            "momentum": group_scores["momentum"],
+            "risk_safety": risk_safety,
+        },
+        STRATEGY_WEIGHTS[strategy_mode],
+    )
+    factor_scores = {
+        "growth": group_scores["growth"],
+        "quality": group_scores["quality"],
+        "valuation": group_scores["valuation"],
+        "fundamental": _safe_round(fundamental),
+        "momentum": group_scores["momentum"],
+        "risk": risk_safety,
+        "risk_safety": risk_safety,
+    }
+    if preview_score is None:
+        notes.append("sector-aware preview unavailable: no valid sector-relative factors.")
+    return _safe_round(preview_score), factor_scores, notes
+
+
+def _sector_relative_mover(item: ScreenResult) -> Dict[str, Any]:
+    return {
+        "ticker": item.ticker,
+        "rank_delta": item.sector_relative_rank_delta,
+        "score_delta": item.sector_relative_score_delta,
+        "preview_score": item.sector_relative_score_preview,
+        "current_score": item.total_score,
+        "preview_rank": item.sector_relative_rank_preview,
+    }
+
+
+def apply_sector_relative_preview(candidates: Sequence[ScreenResult], strategy_mode: str) -> Dict[str, Any]:
+    strategy_mode = _normalize_strategy_mode(strategy_mode)
+    current_ranks = {item.ticker: index for index, item in enumerate(candidates, start=1)}
+    for item in candidates:
+        preview_score, factor_scores, notes = _sector_relative_scores_for_candidate(item, candidates, strategy_mode)
+        item.sector_relative_score_preview = preview_score
+        item.sector_relative_factor_scores = factor_scores
+        item.sector_relative_notes = notes
+        item.sector_relative_score_delta = None
+        if preview_score is not None and item.total_score is not None:
+            item.sector_relative_score_delta = _safe_round(preview_score - item.total_score)
+
+    ranked_preview = sorted(
+        [item for item in candidates if item.sector_relative_score_preview is not None],
+        key=lambda item: (
+            -(item.sector_relative_score_preview or -1.0),
+            current_ranks.get(item.ticker, 10**9),
+            item.ticker,
+        ),
+    )
+    for preview_rank, item in enumerate(ranked_preview, start=1):
+        item.sector_relative_rank_preview = preview_rank
+        current_rank = current_ranks.get(item.ticker)
+        item.sector_relative_rank_delta = None if current_rank is None else current_rank - preview_rank
+
+    score_deltas = [item.sector_relative_score_delta for item in ranked_preview if item.sector_relative_score_delta is not None]
+    rank_changed = [item for item in ranked_preview if item.sector_relative_rank_delta not in (None, 0)]
+    movers_up = sorted(
+        [item for item in ranked_preview if (item.sector_relative_rank_delta or 0) > 0],
+        key=lambda item: (-(item.sector_relative_rank_delta or 0), item.ticker),
+    )
+    movers_down = sorted(
+        [item for item in ranked_preview if (item.sector_relative_rank_delta or 0) < 0],
+        key=lambda item: ((item.sector_relative_rank_delta or 0), item.ticker),
+    )
+    return {
+        "sector_aware_shadow_mode": True,
+        "sector_aware_preview_available_count": len(ranked_preview),
+        "sector_aware_preview_missing_count": len(candidates) - len(ranked_preview),
+        "sector_aware_average_score_delta": _safe_round(sum(score_deltas) / len(score_deltas)) if score_deltas else None,
+        "sector_aware_rank_changed_count": len(rank_changed),
+        "sector_aware_top_movers_up": [_sector_relative_mover(item) for item in movers_up[:5]],
+        "sector_aware_top_movers_down": [_sector_relative_mover(item) for item in movers_down[:5]],
+    }
+
+
+def _format_sector_relative_preview(item: ScreenResult) -> str:
+    if item.sector_relative_score_preview is None:
+        return ""
+    score_delta = item.sector_relative_score_delta
+    rank_delta = item.sector_relative_rank_delta
+    delta_text = "" if score_delta is None else f"{score_delta:+.1f}"
+    rank_text = "" if item.sector_relative_rank_preview is None else f"rank #{item.sector_relative_rank_preview}"
+    rank_delta_text = "" if rank_delta is None else f"{rank_delta:+d}"
+    if rank_text and rank_delta_text:
+        return f"{item.sector_relative_score_preview:.1f} ({delta_text}), {rank_text} ({rank_delta_text})"
+    return f"{item.sector_relative_score_preview:.1f} ({delta_text})"
+
+
 def score_record(
     record: StockRecord,
     config: ScreenConfig,
@@ -2422,6 +2664,7 @@ def screen_records(
             for item in candidates
             if item.total_score is not None and item.total_score >= effective_min_score
         ]
+    sector_relative_summary = apply_sector_relative_preview(candidates, strategy_mode)
     displayed_candidates = candidates[:top_n]
     ranking_diagnostics = build_ranking_diagnostics(displayed_candidates)
     soft_penalties: List[Dict[str, Any]] = []
@@ -2482,6 +2725,13 @@ def screen_records(
         high_volatility_candidate_count=ranking_diagnostics["high_volatility_candidate_count"],
         deep_drawdown_candidate_count=ranking_diagnostics["deep_drawdown_candidate_count"],
         missing_data_candidate_count=ranking_diagnostics["missing_data_candidate_count"],
+        sector_aware_shadow_mode=sector_relative_summary["sector_aware_shadow_mode"],
+        sector_aware_preview_available_count=sector_relative_summary["sector_aware_preview_available_count"],
+        sector_aware_preview_missing_count=sector_relative_summary["sector_aware_preview_missing_count"],
+        sector_aware_average_score_delta=sector_relative_summary["sector_aware_average_score_delta"],
+        sector_aware_rank_changed_count=sector_relative_summary["sector_aware_rank_changed_count"],
+        sector_aware_top_movers_up=sector_relative_summary["sector_aware_top_movers_up"],
+        sector_aware_top_movers_down=sector_relative_summary["sector_aware_top_movers_down"],
     )
 
 
@@ -2515,21 +2765,39 @@ def _render_markdown(report: ScreeningReport) -> str:
     lines.append(f"- high_volatility_candidate_count：{report.high_volatility_candidate_count}")
     lines.append(f"- deep_drawdown_candidate_count：{report.deep_drawdown_candidate_count}")
     lines.append(f"- missing_data_candidate_count：{report.missing_data_candidate_count}")
+    lines.append(f"- sector_aware_shadow_mode：{'啟用' if report.sector_aware_shadow_mode else '未啟用'}")
+    lines.append(f"- sector_aware_preview_available_count：{report.sector_aware_preview_available_count}")
+    lines.append(f"- sector_aware_preview_missing_count：{report.sector_aware_preview_missing_count}")
+    lines.append(f"- sector_aware_average_score_delta：{report.sector_aware_average_score_delta}")
+    lines.append(f"- sector_aware_rank_changed_count：{report.sector_aware_rank_changed_count}")
+    if report.sector_aware_top_movers_up:
+        movers = "；".join(
+            f"{item['ticker']} rank_delta {item.get('rank_delta')} score_delta {item.get('score_delta')}"
+            for item in report.sector_aware_top_movers_up
+        )
+        lines.append(f"- sector_aware_top_movers_up：{movers}")
+    if report.sector_aware_top_movers_down:
+        movers = "；".join(
+            f"{item['ticker']} rank_delta {item.get('rank_delta')} score_delta {item.get('score_delta')}"
+            for item in report.sector_aware_top_movers_down
+        )
+        lines.append(f"- sector_aware_top_movers_down：{movers}")
     if report.strategy_mode == "hybrid" and report.ranking_style == "momentum_driven":
         lines.append("- 診斷提醒：本次 hybrid 排名偏動量導向，適合作為候選初篩，不代表低風險或長期品質排序。")
     lines.append("")
     lines.append("## 候選名單")
     lines.append("")
-    lines.append("| 排名 | Ticker | 總分 | 資料品質 | 動作 | 基本面 | 動量 | 風險安全 | 主要理由 | 風險警示 |")
-    lines.append("| --- | --- | ---: | ---: | --- | ---: | ---: | ---: | --- | --- |")
+    lines.append("| 排名 | Ticker | 總分 | Sector-aware preview | 資料品質 | 動作 | 基本面 | 動量 | 風險安全 | 主要理由 | 風險警示 |")
+    lines.append("| --- | --- | ---: | --- | ---: | --- | ---: | ---: | ---: | --- | --- |")
     for index, item in enumerate(report.candidates, start=1):
         warnings = "；".join(item.risk_warnings) if item.risk_warnings else "無"
         reasons = "；".join(item.reasons)
         lines.append(
-            "| {rank} | {ticker} | {total} | {data_quality} | {action} | {fundamental} | {momentum} | {risk} | {reasons} | {warnings} |".format(
+            "| {rank} | {ticker} | {total} | {sector_preview} | {data_quality} | {action} | {fundamental} | {momentum} | {risk} | {reasons} | {warnings} |".format(
                 rank=index,
                 ticker=item.ticker,
                 total=item.total_score if item.total_score is not None else "",
+                sector_preview=_format_sector_relative_preview(item),
                 data_quality=item.data_quality_score if item.data_quality_score is not None else "",
                 action=item.suggested_action or "",
                 fundamental=item.factor_scores.get("fundamental") or "",
@@ -2609,6 +2877,13 @@ def _render_json(report: ScreeningReport) -> str:
         "high_volatility_candidate_count": report.high_volatility_candidate_count,
         "deep_drawdown_candidate_count": report.deep_drawdown_candidate_count,
         "missing_data_candidate_count": report.missing_data_candidate_count,
+        "sector_aware_shadow_mode": report.sector_aware_shadow_mode,
+        "sector_aware_preview_available_count": report.sector_aware_preview_available_count,
+        "sector_aware_preview_missing_count": report.sector_aware_preview_missing_count,
+        "sector_aware_average_score_delta": report.sector_aware_average_score_delta,
+        "sector_aware_rank_changed_count": report.sector_aware_rank_changed_count,
+        "sector_aware_top_movers_up": report.sector_aware_top_movers_up,
+        "sector_aware_top_movers_down": report.sector_aware_top_movers_down,
         "candidates": [
             {
                 "ticker": item.ticker,
@@ -2636,6 +2911,12 @@ def _render_json(report: ScreeningReport) -> str:
                 "suggested_action": item.suggested_action,
                 "action_cap_reason": item.action_cap_reason,
                 "hard_exclusion": item.hard_exclusion,
+                "sector_relative_score_preview": item.sector_relative_score_preview,
+                "sector_relative_rank_preview": item.sector_relative_rank_preview,
+                "sector_relative_score_delta": item.sector_relative_score_delta,
+                "sector_relative_rank_delta": item.sector_relative_rank_delta,
+                "sector_relative_notes": item.sector_relative_notes,
+                "sector_relative_factor_scores": item.sector_relative_factor_scores,
             }
             for item in report.candidates
         ],

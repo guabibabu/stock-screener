@@ -177,7 +177,7 @@ Hybrid candidates can use safer action labels:
 
 ## Percentile Scoring Utilities
 
-The codebase includes reusable percentile scoring helpers for future shadow-mode and sector-aware scoring. These helpers are not wired into the live hybrid or stop-mode score yet, so current rankings and actions are unchanged.
+The codebase includes reusable percentile scoring helpers for shadow-mode and sector-aware scoring. These helpers are not wired into the live hybrid or stop-mode score, so current rankings and actions are unchanged.
 
 - `winsorize_value`
 - `winsorize_series`
@@ -193,6 +193,45 @@ Supported missing-data policies:
 - `neutral`: return 50
 - `zero`: return 0
 - `penalize`: return a low configurable score, default 25
+
+## Sector-Aware Shadow Preview
+
+Reports now include a sector-relative preview layer. This is a shadow score only:
+
+- It does not change `total_score`.
+- It does not change formal ranking.
+- It does not change `suggested_action`.
+- It is used to observe how a sector-aware percentile model would compare with the current model.
+
+Candidate-level preview fields:
+
+- `sector_relative_score_preview`
+- `sector_relative_rank_preview`
+- `sector_relative_score_delta`
+- `sector_relative_rank_delta`
+- `sector_relative_factor_scores`
+- `sector_relative_notes`
+
+Report-level preview fields:
+
+- `sector_aware_shadow_mode`
+- `sector_aware_preview_available_count`
+- `sector_aware_preview_missing_count`
+- `sector_aware_average_score_delta`
+- `sector_aware_rank_changed_count`
+- `sector_aware_top_movers_up`
+- `sector_aware_top_movers_down`
+
+Initial preview factors:
+
+- Higher is better: `revenue_growth_yoy`, `eps_growth_yoy`, `gross_margin`, `operating_margin`, `return_on_equity`, `relative_strength_252d`, `price_vs_sma200_pct`, `avg_dollar_volume_20d`
+- Lower is better: `pe_ratio`, `ps_ratio`, `volatility_63d`, `beta`, `max_drawdown_252d`
+
+Peer selection:
+
+- Use same-sector percentile when sector peer count is at least 30.
+- Otherwise fall back to the full candidate universe.
+- Missing fields are ignored and reweighted inside the preview; they are reported in `sector_relative_notes`.
 
 ## Tuning Knobs
 

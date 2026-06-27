@@ -111,8 +111,38 @@ All strategy modes can emit these report-level diagnostics:
 - `high_volatility_candidate_count`
 - `deep_drawdown_candidate_count`
 - `missing_data_candidate_count`
+- `sector_aware_shadow_mode`
+- `sector_aware_preview_available_count`
+- `sector_aware_preview_missing_count`
+- `sector_aware_average_score_delta`
+- `sector_aware_rank_changed_count`
+- `sector_aware_top_movers_up`
+- `sector_aware_top_movers_down`
 
 Hybrid candidates can use `CANDIDATE_HIGH_RISK` or `CANDIDATE_DATA_LIMITED` when a name is still ranked but should not be read as a clean low-risk candidate.
+
+## Sector-Aware Preview Output
+
+The sector-aware preview is a shadow output. It is for diagnostics only and does not change the official ranking, score, or action.
+
+Each candidate can include:
+
+- `sector_relative_score_preview`
+- `sector_relative_rank_preview`
+- `sector_relative_score_delta`
+- `sector_relative_rank_delta`
+- `sector_relative_factor_scores`
+- `sector_relative_notes`
+
+`sector_relative_factor_scores` can include:
+
+- `growth`
+- `quality`
+- `valuation`
+- `fundamental`
+- `momentum`
+- `risk`
+- `risk_safety`
 
 ## Hard-Filter Flags
 
