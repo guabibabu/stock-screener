@@ -573,10 +573,17 @@ Stop mode 不是每日買賣訊號，而是低頻審查。
 - `sector_relative_notes`
 - `sector_aware_preview_available_count`
 - `sector_aware_preview_missing_count`
+- `sector_aware_preview_coverage`
 - `sector_aware_average_score_delta`
+- `sector_aware_score_correlation_with_current`
 - `sector_aware_rank_changed_count`
+- `sector_aware_top_10_overlap`
+- `sector_aware_top_10_overlap_total`
+- `sector_aware_large_rank_change_count`
+- `sector_aware_large_rank_change_threshold`
 - `sector_aware_top_movers_up`
 - `sector_aware_top_movers_down`
+- `sector_aware_largest_movers`
 
 這一層只用來觀察：
 
@@ -593,6 +600,18 @@ Stop mode 不是每日買賣訊號，而是低頻審查。
 - soft penalties
 
 初版 preview 使用同 sector peers；若同產業候選數少於 30，fallback 到全候選 universe。缺欄位不直接扣分，只在 preview 內忽略並寫入 notes。
+
+Phase 2C.5 又補上 preview diagnostics：
+
+```text
+coverage
+score correlation with current score
+official top 10 vs preview top 10 overlap
+large rank movement count
+largest movers with factor explanation
+```
+
+這些欄位用來判斷是否可以進入 Phase 2D，而不是直接切換正式模型。
 
 ## 18. 對策略優化的約束
 

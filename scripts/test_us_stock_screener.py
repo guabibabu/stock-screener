@@ -349,6 +349,120 @@ class ScreenerTests(unittest.TestCase):
         self.assertIn("sector_relative_score_preview", report["candidates"][0])
         self.assertIn("sector_relative_factor_scores", report["candidates"][0])
 
+    def test_sector_relative_preview_coverage_and_correlation(self) -> None:
+        records = [
+            self._sector_preview_record("LOW", revenue_growth_yoy=1, eps_growth_yoy=1),
+            self._sector_preview_record("MID", revenue_growth_yoy=10, eps_growth_yoy=10),
+            self._sector_preview_record("HIGH", revenue_growth_yoy=30, eps_growth_yoy=30),
+        ]
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=3)
+        self.assertEqual(report.sector_aware_preview_coverage, 1.0)
+        self.assertIsNotNone(report.sector_aware_score_correlation_with_current)
+        self.assertGreaterEqual(report.sector_aware_score_correlation_with_current or 0, -1.0)
+        self.assertLessEqual(report.sector_aware_score_correlation_with_current or 0, 1.0)
+
+    def test_sector_relative_top_10_overlap(self) -> None:
+        records = [
+            self._sector_preview_record(f"OVL{index:02d}", revenue_growth_yoy=index, eps_growth_yoy=index)
+            for index in range(12)
+        ]
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=12)
+        self.assertIsNotNone(report.sector_aware_top_10_overlap)
+        self.assertGreaterEqual(report.sector_aware_top_10_overlap or 0, 0)
+        self.assertLessEqual(report.sector_aware_top_10_overlap or 0, report.sector_aware_top_10_overlap_total)
+        self.assertEqual(report.sector_aware_top_10_overlap_total, 10)
+
+    def test_sector_relative_large_rank_change_summary(self) -> None:
+        candidates = []
+        for index in range(25):
+            candidates.append(
+                screener.ScreenResult(
+                    ticker=f"REV{index:02d}",
+                    strategy_mode="hybrid",
+                    total_score=100 - index,
+                    raw_score=100 - index,
+                    adjusted_score=100 - index,
+                    fundamental_score=100 - index,
+                    momentum_score=100 - index,
+                    risk_safety_score=100 - index,
+                    factor_scores={},
+                    reasons=[],
+                    risk_warnings=[],
+                    confidence_notes=[],
+                    record=screener.StockRecord(
+                        ticker=f"REV{index:02d}",
+                        sector="Technology",
+                        revenue_growth_yoy=index,
+                        eps_growth_yoy=index,
+                        gross_margin=20 + index,
+                        operating_margin=5 + index,
+                        return_on_equity=5 + index,
+                        pe_ratio=80 - index,
+                        ps_ratio=30 - index,
+                        relative_strength_252d=index,
+                        price_vs_sma200_pct=index,
+                        volatility_63d=80 - index,
+                        beta=2.5 - index * 0.05,
+                        max_drawdown_252d=50 - index,
+                        avg_dollar_volume_20d=30_000_000 + index * 1_000_000,
+                    ),
+                )
+            )
+        summary = screener.apply_sector_relative_preview(candidates, "hybrid")
+        self.assertEqual(summary["sector_aware_top_10_overlap"], 0)
+        self.assertGreater(summary["sector_aware_large_rank_change_count"], 0)
+        self.assertEqual(summary["sector_aware_large_rank_change_threshold"], screener.SECTOR_RELATIVE_LARGE_RANK_CHANGE_THRESHOLD)
+        self.assertTrue(summary["sector_aware_largest_movers"])
+
+    def test_sector_relative_largest_movers_include_factor_explanation(self) -> None:
+        candidates = []
+        for index in range(3):
+            candidates.append(
+                screener.ScreenResult(
+                    ticker=f"MOV{index}",
+                    strategy_mode="hybrid",
+                    total_score=90 - index,
+                    raw_score=90 - index,
+                    adjusted_score=90 - index,
+                    fundamental_score=90 - index,
+                    momentum_score=90 - index,
+                    risk_safety_score=90 - index,
+                    factor_scores={},
+                    reasons=[],
+                    risk_warnings=[],
+                    confidence_notes=[],
+                    record=screener.StockRecord(
+                        ticker=f"MOV{index}",
+                        sector="Technology",
+                        revenue_growth_yoy=index,
+                        eps_growth_yoy=index,
+                        gross_margin=20 + index,
+                        operating_margin=5 + index,
+                        return_on_equity=5 + index,
+                        pe_ratio=80 - index,
+                        ps_ratio=30 - index,
+                        relative_strength_252d=index,
+                        price_vs_sma200_pct=index,
+                        volatility_63d=80 - index,
+                        beta=2.5 - index * 0.05,
+                        max_drawdown_252d=50 - index,
+                        avg_dollar_volume_20d=30_000_000 + index * 1_000_000,
+                    ),
+                )
+            )
+        summary = screener.apply_sector_relative_preview(candidates, "hybrid")
+        mover = summary["sector_aware_largest_movers"][0]
+        self.assertIn("factor_scores", mover)
+        self.assertIn("growth", mover["factor_scores"])
+        self.assertIn("notes", mover)
+
+    def test_sector_relative_diagnostics_do_not_change_sample_ranking(self) -> None:
+        sample = SCRIPT_DIR.parent / "references" / "sample-universe.csv"
+        report = build_report(load_records(sample), self.config, strategy_mode="hybrid", top_n=4)
+        self.assertEqual([item.ticker for item in report.candidates], ["NVDA", "MSFT", "AAPL"])
+        self.assertEqual([item.total_score for item in report.candidates], [76.5, 74.7, 66.5])
+        self.assertEqual([item.suggested_action for item in report.candidates], ["CANDIDATE", "CANDIDATE", "CANDIDATE"])
+
     def test_sample_watchlist_loads(self) -> None:
         sample = SCRIPT_DIR.parent / "references" / "sample-watchlist.csv"
         tickers = load_watchlist(sample)

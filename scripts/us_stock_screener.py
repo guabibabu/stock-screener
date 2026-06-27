@@ -570,6 +570,7 @@ SECTOR_RELATIVE_FACTOR_FIELDS = {
         ("avg_dollar_volume_20d", "higher"),
     ],
 }
+SECTOR_RELATIVE_LARGE_RANK_CHANGE_THRESHOLD = 20
 
 MAX_STOP_CHECKING_PRICE_PENALTY = 25
 DEFAULT_MIN_SCORE_BY_MODE = {
@@ -799,6 +800,13 @@ class ScreeningReport:
     sector_aware_rank_changed_count: int = 0
     sector_aware_top_movers_up: List[Dict[str, Any]] = field(default_factory=list)
     sector_aware_top_movers_down: List[Dict[str, Any]] = field(default_factory=list)
+    sector_aware_preview_coverage: Optional[float] = None
+    sector_aware_score_correlation_with_current: Optional[float] = None
+    sector_aware_top_10_overlap: Optional[int] = None
+    sector_aware_top_10_overlap_total: int = 0
+    sector_aware_large_rank_change_count: int = 0
+    sector_aware_large_rank_change_threshold: int = SECTOR_RELATIVE_LARGE_RANK_CHANGE_THRESHOLD
+    sector_aware_largest_movers: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def _canonicalize_record(payload: Dict[str, Any]) -> StockRecord:
@@ -2293,7 +2301,25 @@ def _sector_relative_mover(item: ScreenResult) -> Dict[str, Any]:
         "preview_score": item.sector_relative_score_preview,
         "current_score": item.total_score,
         "preview_rank": item.sector_relative_rank_preview,
+        "factor_scores": item.sector_relative_factor_scores,
+        "notes": item.sector_relative_notes[:5],
     }
+
+
+def _pearson_correlation(pairs: Sequence[Tuple[float, float]]) -> Optional[float]:
+    if len(pairs) < 2:
+        return None
+    left_values = [left for left, _right in pairs]
+    right_values = [right for _left, right in pairs]
+    left_mean = sum(left_values) / len(left_values)
+    right_mean = sum(right_values) / len(right_values)
+    numerator = sum((left - left_mean) * (right - right_mean) for left, right in pairs)
+    left_variance = sum((left - left_mean) ** 2 for left in left_values)
+    right_variance = sum((right - right_mean) ** 2 for right in right_values)
+    denominator = math.sqrt(left_variance * right_variance)
+    if denominator == 0:
+        return None
+    return numerator / denominator
 
 
 def apply_sector_relative_preview(candidates: Sequence[ScreenResult], strategy_mode: str) -> Dict[str, Any]:
@@ -2323,6 +2349,30 @@ def apply_sector_relative_preview(candidates: Sequence[ScreenResult], strategy_m
 
     score_deltas = [item.sector_relative_score_delta for item in ranked_preview if item.sector_relative_score_delta is not None]
     rank_changed = [item for item in ranked_preview if item.sector_relative_rank_delta not in (None, 0)]
+    top_overlap_total = min(10, len(candidates), len(ranked_preview))
+    current_top = {item.ticker for item in candidates[:top_overlap_total]}
+    preview_top = {item.ticker for item in ranked_preview[:top_overlap_total]}
+    top_overlap = len(current_top & preview_top) if top_overlap_total else None
+    score_pairs = [
+        (item.total_score, item.sector_relative_score_preview)
+        for item in ranked_preview
+        if item.total_score is not None and item.sector_relative_score_preview is not None
+    ]
+    correlation = _pearson_correlation(score_pairs)  # type: ignore[arg-type]
+    large_rank_changes = [
+        item
+        for item in ranked_preview
+        if item.sector_relative_rank_delta is not None
+        and abs(item.sector_relative_rank_delta) >= SECTOR_RELATIVE_LARGE_RANK_CHANGE_THRESHOLD
+    ]
+    largest_movers = sorted(
+        rank_changed,
+        key=lambda item: (
+            -abs(item.sector_relative_rank_delta or 0),
+            -abs(item.sector_relative_score_delta or 0),
+            item.ticker,
+        ),
+    )
     movers_up = sorted(
         [item for item in ranked_preview if (item.sector_relative_rank_delta or 0) > 0],
         key=lambda item: (-(item.sector_relative_rank_delta or 0), item.ticker),
@@ -2339,6 +2389,13 @@ def apply_sector_relative_preview(candidates: Sequence[ScreenResult], strategy_m
         "sector_aware_rank_changed_count": len(rank_changed),
         "sector_aware_top_movers_up": [_sector_relative_mover(item) for item in movers_up[:5]],
         "sector_aware_top_movers_down": [_sector_relative_mover(item) for item in movers_down[:5]],
+        "sector_aware_preview_coverage": _safe_round(len(ranked_preview) / len(candidates), 3) if candidates else None,
+        "sector_aware_score_correlation_with_current": _safe_round(correlation, 3),
+        "sector_aware_top_10_overlap": top_overlap,
+        "sector_aware_top_10_overlap_total": top_overlap_total,
+        "sector_aware_large_rank_change_count": len(large_rank_changes),
+        "sector_aware_large_rank_change_threshold": SECTOR_RELATIVE_LARGE_RANK_CHANGE_THRESHOLD,
+        "sector_aware_largest_movers": [_sector_relative_mover(item) for item in largest_movers[:10]],
     }
 
 
@@ -2732,6 +2789,13 @@ def screen_records(
         sector_aware_rank_changed_count=sector_relative_summary["sector_aware_rank_changed_count"],
         sector_aware_top_movers_up=sector_relative_summary["sector_aware_top_movers_up"],
         sector_aware_top_movers_down=sector_relative_summary["sector_aware_top_movers_down"],
+        sector_aware_preview_coverage=sector_relative_summary["sector_aware_preview_coverage"],
+        sector_aware_score_correlation_with_current=sector_relative_summary["sector_aware_score_correlation_with_current"],
+        sector_aware_top_10_overlap=sector_relative_summary["sector_aware_top_10_overlap"],
+        sector_aware_top_10_overlap_total=sector_relative_summary["sector_aware_top_10_overlap_total"],
+        sector_aware_large_rank_change_count=sector_relative_summary["sector_aware_large_rank_change_count"],
+        sector_aware_large_rank_change_threshold=sector_relative_summary["sector_aware_large_rank_change_threshold"],
+        sector_aware_largest_movers=sector_relative_summary["sector_aware_largest_movers"],
     )
 
 
@@ -2770,6 +2834,13 @@ def _render_markdown(report: ScreeningReport) -> str:
     lines.append(f"- sector_aware_preview_missing_count：{report.sector_aware_preview_missing_count}")
     lines.append(f"- sector_aware_average_score_delta：{report.sector_aware_average_score_delta}")
     lines.append(f"- sector_aware_rank_changed_count：{report.sector_aware_rank_changed_count}")
+    lines.append(f"- sector_aware_preview_coverage：{report.sector_aware_preview_coverage}")
+    lines.append(f"- sector_aware_score_correlation_with_current：{report.sector_aware_score_correlation_with_current}")
+    lines.append(f"- sector_aware_top_10_overlap：{report.sector_aware_top_10_overlap} / {report.sector_aware_top_10_overlap_total}")
+    lines.append(
+        f"- sector_aware_large_rank_change_count：{report.sector_aware_large_rank_change_count}"
+        f"（threshold {report.sector_aware_large_rank_change_threshold}）"
+    )
     if report.sector_aware_top_movers_up:
         movers = "；".join(
             f"{item['ticker']} rank_delta {item.get('rank_delta')} score_delta {item.get('score_delta')}"
@@ -2782,6 +2853,12 @@ def _render_markdown(report: ScreeningReport) -> str:
             for item in report.sector_aware_top_movers_down
         )
         lines.append(f"- sector_aware_top_movers_down：{movers}")
+    if report.sector_aware_largest_movers:
+        movers = "；".join(
+            f"{item['ticker']} rank_delta {item.get('rank_delta')} score_delta {item.get('score_delta')}"
+            for item in report.sector_aware_largest_movers[:5]
+        )
+        lines.append(f"- sector_aware_largest_movers：{movers}")
     if report.strategy_mode == "hybrid" and report.ranking_style == "momentum_driven":
         lines.append("- 診斷提醒：本次 hybrid 排名偏動量導向，適合作為候選初篩，不代表低風險或長期品質排序。")
     lines.append("")
@@ -2884,6 +2961,13 @@ def _render_json(report: ScreeningReport) -> str:
         "sector_aware_rank_changed_count": report.sector_aware_rank_changed_count,
         "sector_aware_top_movers_up": report.sector_aware_top_movers_up,
         "sector_aware_top_movers_down": report.sector_aware_top_movers_down,
+        "sector_aware_preview_coverage": report.sector_aware_preview_coverage,
+        "sector_aware_score_correlation_with_current": report.sector_aware_score_correlation_with_current,
+        "sector_aware_top_10_overlap": report.sector_aware_top_10_overlap,
+        "sector_aware_top_10_overlap_total": report.sector_aware_top_10_overlap_total,
+        "sector_aware_large_rank_change_count": report.sector_aware_large_rank_change_count,
+        "sector_aware_large_rank_change_threshold": report.sector_aware_large_rank_change_threshold,
+        "sector_aware_largest_movers": report.sector_aware_largest_movers,
         "candidates": [
             {
                 "ticker": item.ticker,

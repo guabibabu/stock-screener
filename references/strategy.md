@@ -217,10 +217,25 @@ Report-level preview fields:
 - `sector_aware_shadow_mode`
 - `sector_aware_preview_available_count`
 - `sector_aware_preview_missing_count`
+- `sector_aware_preview_coverage`
 - `sector_aware_average_score_delta`
+- `sector_aware_score_correlation_with_current`
 - `sector_aware_rank_changed_count`
+- `sector_aware_top_10_overlap`
+- `sector_aware_top_10_overlap_total`
+- `sector_aware_large_rank_change_count`
+- `sector_aware_large_rank_change_threshold`
 - `sector_aware_top_movers_up`
 - `sector_aware_top_movers_down`
+- `sector_aware_largest_movers`
+
+Phase 2C.5 diagnostics:
+
+- `sector_aware_preview_coverage`: share of displayed candidates with usable preview scores.
+- `sector_aware_score_correlation_with_current`: Pearson correlation between official score and preview score.
+- `sector_aware_top_10_overlap`: overlap count between official top 10 and preview top 10.
+- `sector_aware_large_rank_change_count`: count of names whose preview rank moved by at least the configured threshold.
+- `sector_aware_largest_movers`: largest rank movers with preview factor breakdown and notes.
 
 Initial preview factors:
 

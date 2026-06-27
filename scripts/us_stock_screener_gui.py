@@ -1333,6 +1333,10 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
         f"sector_aware_preview_missing_count：{report.sector_aware_preview_missing_count}",
         f"sector_aware_average_score_delta：{report.sector_aware_average_score_delta}",
         f"sector_aware_rank_changed_count：{report.sector_aware_rank_changed_count}",
+        f"sector_aware_preview_coverage：{report.sector_aware_preview_coverage}",
+        f"sector_aware_score_correlation_with_current：{report.sector_aware_score_correlation_with_current}",
+        f"sector_aware_top_10_overlap：{report.sector_aware_top_10_overlap} / {report.sector_aware_top_10_overlap_total}",
+        f"sector_aware_large_rank_change_count：{report.sector_aware_large_rank_change_count}（threshold {report.sector_aware_large_rank_change_threshold}）",
     ]
     if report.sector_aware_top_movers_up:
         movers = "；".join(
@@ -1346,6 +1350,12 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
             for item in report.sector_aware_top_movers_down
         )
         lines.append(f"sector_aware_top_movers_down：{movers}")
+    if report.sector_aware_largest_movers:
+        movers = "；".join(
+            f"{item['ticker']} rank_delta {item.get('rank_delta')} score_delta {item.get('score_delta')}"
+            for item in report.sector_aware_largest_movers[:5]
+        )
+        lines.append(f"sector_aware_largest_movers：{movers}")
     if report.strategy_mode == "hybrid" and report.ranking_style == "momentum_driven":
         lines.append("診斷提醒：本次 hybrid 排名偏動量導向，適合作為候選初篩，不代表低風險或長期品質排序。")
     if bundle is not None:

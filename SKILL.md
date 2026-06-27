@@ -43,6 +43,7 @@ Canonical source: the installed skill at `~/.codex/skills/us-stock-screener/`. T
 
 - Candidate list ordered by total score.
 - Sector-aware preview fields for diagnostics only; these do not change the official ranking or action label.
+- Sector-aware preview diagnostics: coverage, score correlation, top-10 overlap, large rank moves, and largest movers.
 - Factor breakdown: fundamental, growth, quality, valuation, momentum, risk, liquidity, and confidence when available.
 - Reason bullets in Chinese.
 - Risk warnings for volatility, leverage, drawdown, stale data, and missing fundamentals.

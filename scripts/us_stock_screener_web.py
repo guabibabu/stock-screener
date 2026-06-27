@@ -212,6 +212,13 @@ def _report_to_payload(report: Any, *, source_name: str, bundle: Any = None) -> 
         "sector_aware_rank_changed_count": report.sector_aware_rank_changed_count,
         "sector_aware_top_movers_up": report.sector_aware_top_movers_up,
         "sector_aware_top_movers_down": report.sector_aware_top_movers_down,
+        "sector_aware_preview_coverage": report.sector_aware_preview_coverage,
+        "sector_aware_score_correlation_with_current": report.sector_aware_score_correlation_with_current,
+        "sector_aware_top_10_overlap": report.sector_aware_top_10_overlap,
+        "sector_aware_top_10_overlap_total": report.sector_aware_top_10_overlap_total,
+        "sector_aware_large_rank_change_count": report.sector_aware_large_rank_change_count,
+        "sector_aware_large_rank_change_threshold": report.sector_aware_large_rank_change_threshold,
+        "sector_aware_largest_movers": report.sector_aware_largest_movers,
         "snapshot": None
         if bundle is None
         else {
@@ -625,12 +632,19 @@ INDEX_HTML = r"""<!doctype html>
         `sector_aware_preview_missing_count：${report.sector_aware_preview_missing_count}`,
         `sector_aware_average_score_delta：${report.sector_aware_average_score_delta}`,
         `sector_aware_rank_changed_count：${report.sector_aware_rank_changed_count}`,
+        `sector_aware_preview_coverage：${report.sector_aware_preview_coverage}`,
+        `sector_aware_score_correlation_with_current：${report.sector_aware_score_correlation_with_current}`,
+        `sector_aware_top_10_overlap：${report.sector_aware_top_10_overlap} / ${report.sector_aware_top_10_overlap_total}`,
+        `sector_aware_large_rank_change_count：${report.sector_aware_large_rank_change_count}（threshold ${report.sector_aware_large_rank_change_threshold}）`,
       ];
       if (report.sector_aware_top_movers_up && report.sector_aware_top_movers_up.length) {
         lines.push(`sector_aware_top_movers_up：${report.sector_aware_top_movers_up.map(item => `${item.ticker} rank_delta ${item.rank_delta} score_delta ${item.score_delta}`).join('；')}`);
       }
       if (report.sector_aware_top_movers_down && report.sector_aware_top_movers_down.length) {
         lines.push(`sector_aware_top_movers_down：${report.sector_aware_top_movers_down.map(item => `${item.ticker} rank_delta ${item.rank_delta} score_delta ${item.score_delta}`).join('；')}`);
+      }
+      if (report.sector_aware_largest_movers && report.sector_aware_largest_movers.length) {
+        lines.push(`sector_aware_largest_movers：${report.sector_aware_largest_movers.slice(0, 5).map(item => `${item.ticker} rank_delta ${item.rank_delta} score_delta ${item.score_delta}`).join('；')}`);
       }
       lines.push('', '候選名單', '');
       (report.candidates || []).forEach((item, index) => {
