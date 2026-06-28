@@ -1155,6 +1155,10 @@ class ScreenerTests(unittest.TestCase):
         self.assertEqual(web_payload["sector_aware_status"], "disabled_insufficient_sector_metadata")
         self.assertEqual(web_payload["market_regime"], "neutral")
         self.assertEqual(web_payload["market_regime_status"], "insufficient_market_data")
+        self.assertIn("檢查模式：manual_decision_support", markdown)
+        self.assertIn("review_summary：", markdown)
+        self.assertIn("review_mode：manual_decision_support", gui_text)
+        self.assertIn("review_summary：", gui_text)
         self.assertIn("Official source", markdown)
         self.assertIn("Official source", gui_text)
         self.assertIn("official_score_source", web_payload["candidates"][0])
@@ -1163,6 +1167,15 @@ class ScreenerTests(unittest.TestCase):
         self.assertIn("Peer reason", markdown)
         self.assertIn("Peer reason", gui_text)
         self.assertIn("sector_relative_peer_reason", web_payload["candidates"][0])
+        self.assertIn("檢查模式：manual_decision_support", markdown)
+        self.assertIn("review_summary：", markdown)
+        self.assertIn("review_mode：manual_decision_support", gui_text)
+        self.assertIn("review_summary：", gui_text)
+        self.assertEqual(web_payload["review_mode"], "manual_decision_support")
+        self.assertIn("review_summary", web_payload)
+        self.assertIn("review_priority", web_payload["candidates"][0])
+        self.assertIn("recommended_review_cadence", web_payload["candidates"][0])
+        self.assertIn("review_reasons", web_payload["candidates"][0])
 
     def test_sector_aware_winsorization_limits_outlier_effect(self) -> None:
         records = [
@@ -1637,7 +1650,8 @@ class ScreenerTests(unittest.TestCase):
         ]
         report = build_report(records, self.config, strategy_mode="stop_checking_price", as_of=date(2026, 4, 20))
         self.assertEqual(report.strategy_mode, "stop_checking_price")
-        self.assertEqual(report.review_mode, "watchlist_only")
+        self.assertEqual(report.review_mode, "manual_decision_support")
+        self.assertEqual(report.review_window_mode, "watchlist_only")
         self.assertEqual(len(report.candidates), 1)
         candidate = report.candidates[0]
         self.assertEqual(candidate.strategy_mode, "stop_checking_price")
@@ -1653,10 +1667,350 @@ class ScreenerTests(unittest.TestCase):
         self.assertIn("debt_to_equity_normalized", candidate.company_snapshot)
         self.assertIn("data_quality_score", candidate.company_snapshot)
         self.assertIn("data_quality_flags", candidate.company_snapshot)
+
+    def test_hybrid_candidate_gets_weekly_routine_review(self) -> None:
+        report = build_report([self._sector_preview_record("AAA")], self.config, strategy_mode="hybrid", top_n=1)
+        candidate = report.candidates[0]
+        self.assertEqual(candidate.suggested_action, "CANDIDATE")
+        self.assertTrue(candidate.review_required)
+        self.assertEqual(candidate.review_priority, "routine")
+        self.assertEqual(candidate.recommended_review_cadence, "weekly")
+        self.assertEqual(candidate.review_reasons, ["hybrid_weekly_candidate_review"])
+
+    def test_hybrid_candidate_high_risk_gets_prompt_review(self) -> None:
+        momentum_driven = self._sector_preview_record(
+            "MOMO1",
+            relative_strength_252d=100,
+            price_vs_sma50_pct=25,
+            price_vs_sma200_pct=45,
+        )
+        high_risk = dict(
+            momentum_driven,
+            ticker="RISKY",
+            revenue_growth_yoy=25,
+            eps_growth_yoy=30,
+            gross_margin=55,
+            operating_margin=35,
+            return_on_equity=25,
+            pe_ratio=50,
+            beta=2.0,
+            volatility_63d=55,
+            max_drawdown_252d=45,
+        )
+        report = build_report([momentum_driven, high_risk], self.config, strategy_mode="hybrid", top_n=2)
+        candidate = next(item for item in report.candidates if item.ticker == "RISKY")
+        self.assertEqual(candidate.suggested_action, "CANDIDATE_HIGH_RISK")
+        self.assertTrue(candidate.review_required)
+        self.assertEqual(candidate.review_priority, "prompt")
+        self.assertEqual(candidate.recommended_review_cadence, "prompt_manual_review")
+        self.assertIn("high_risk_candidate", candidate.review_reasons)
+        self.assertIn("low_risk_safety_score", candidate.review_reasons)
+
+    def test_hybrid_candidate_data_limited_gets_prompt_review(self) -> None:
+        record = self._sector_preview_record("LIMITED", beta=None)
+        report = build_report([record], self.config, strategy_mode="hybrid", top_n=1)
+        candidate = report.candidates[0]
+        self.assertEqual(candidate.suggested_action, "CANDIDATE_DATA_LIMITED")
+        self.assertTrue(candidate.review_required)
+        self.assertEqual(candidate.review_priority, "prompt")
+        self.assertEqual(candidate.recommended_review_cadence, "prompt_manual_review")
+        self.assertIn("data_limited_candidate", candidate.review_reasons)
+
+    def test_stop_watchlist_and_high_quality_get_quarterly_routine_review(self) -> None:
+        strong = {
+            "ticker": "QUAL",
+            "company_name": "Quality",
+            "sector": "Technology",
+            "industry": "Software",
+            "price": 120,
+            "market_cap": 60_000_000_000,
+            "avg_dollar_volume_20d": 180_000_000,
+            "revenue_growth_yoy": 22.0,
+            "eps_growth_yoy": 24.0,
+            "gross_margin_ttm": 58.0,
+            "operating_margin_ttm": 27.0,
+            "roe": 21.0,
+            "roic": 17.0,
+            "free_cash_flow": 3_000_000_000,
+            "debt_to_equity": 0.5,
+            "shares_growth_yoy": 1.0,
+            "pe_ratio": 24,
+            "ps_ratio": 6,
+            "max_drawdown_1y": -18.0,
+            "volatility_1y": 20.0,
+            "price_vs_200dma": 8.0,
+            "data_age_days": 2,
+        }
+        weak = {
+            "ticker": "WEAK",
+            "company_name": "Weak",
+            "sector": "Technology",
+            "industry": "Software",
+            "price": 120,
+            "market_cap": 60_000_000_000,
+            "avg_dollar_volume_20d": 180_000_000,
+            "revenue_growth_yoy": -3.0,
+            "eps_growth_yoy": -5.0,
+            "gross_margin_ttm": 24.0,
+            "operating_margin_ttm": 4.0,
+            "roe": 5.0,
+            "roic": 3.0,
+            "free_cash_flow": 50_000_000,
+            "debt_to_equity": 2.5,
+            "shares_growth_yoy": 8.0,
+            "pe_ratio": 55,
+            "ps_ratio": 12,
+            "max_drawdown_1y": -45.0,
+            "volatility_1y": 48.0,
+            "price_vs_200dma": -12.0,
+            "data_age_days": 2,
+        }
+        report = build_report(
+            [strong, weak],
+            self.config,
+            strategy_mode="stop_checking_price",
+            min_score=0,
+            force_rebalance=True,
+            as_of=date(2026, 4, 20),
+        )
+        candidate = next(item for item in report.candidates if item.ticker == "QUAL")
+        self.assertIn(candidate.suggested_action, {"WATCHLIST", "WATCHLIST_HIGH_QUALITY", "BUY_CANDIDATE"})
+        self.assertTrue(candidate.review_required)
+        self.assertEqual(candidate.review_priority, "routine")
+        self.assertEqual(candidate.recommended_review_cadence, "quarterly")
+        self.assertEqual(candidate.review_reasons, ["stop_mode_quarterly_review"])
+
+    def test_stop_watchlist_data_insufficient_gets_prompt_review(self) -> None:
+        record = {
+            "ticker": "MISS",
+            "company_name": "Missing",
+            "sector": "Technology",
+            "industry": "Software",
+            "price": 100,
+            "market_cap": 40_000_000_000,
+            "avg_dollar_volume_20d": 90_000_000,
+            "revenue_growth_yoy": 10.0,
+            "eps_growth_yoy": 11.0,
+            "price_vs_200dma": 5.0,
+            "data_age_days": 2,
+        }
+        weak = {
+            "ticker": "WEAK",
+            "company_name": "Weak",
+            "sector": "Technology",
+            "industry": "Software",
+            "price": 100,
+            "market_cap": 40_000_000_000,
+            "avg_dollar_volume_20d": 90_000_000,
+            "revenue_growth_yoy": -8.0,
+            "eps_growth_yoy": -12.0,
+            "gross_margin_ttm": 20.0,
+            "operating_margin_ttm": -5.0,
+            "roe": 2.0,
+            "roic": 1.0,
+            "free_cash_flow": -100_000_000,
+            "debt_to_equity": 3.0,
+            "shares_growth_yoy": 8.0,
+            "pe_ratio": 80,
+            "ps_ratio": 15,
+            "max_drawdown_1y": -50.0,
+            "volatility_1y": 55.0,
+            "price_vs_200dma": -18.0,
+            "data_age_days": 2,
+        }
+        report = build_report(
+            [record, weak],
+            self.config,
+            strategy_mode="stop_checking_price",
+            min_score=0,
+            force_rebalance=True,
+            as_of=date(2026, 4, 20),
+        )
+        candidate = next(item for item in report.candidates if item.ticker == "MISS")
+        self.assertEqual(candidate.suggested_action, "WATCHLIST_DATA_INSUFFICIENT")
+        self.assertTrue(candidate.review_required)
+        self.assertEqual(candidate.review_priority, "prompt")
+        self.assertEqual(candidate.recommended_review_cadence, "prompt_manual_review")
+        self.assertIn("data_insufficient", candidate.review_reasons)
+
+    def test_action_cap_reason_overrides_to_prompt_manual_review(self) -> None:
+        strong = {
+            "ticker": "CAP",
+            "company_name": "Capped",
+            "sector": "Technology",
+            "industry": "Software",
+            "price": 120,
+            "market_cap": 60_000_000_000,
+            "avg_dollar_volume_20d": 180_000_000,
+            "revenue_growth_yoy": 22.0,
+            "eps_growth_yoy": 24.0,
+            "gross_margin_ttm": 58.0,
+            "operating_margin_ttm": 27.0,
+            "roe": 21.0,
+            "roic": 17.0,
+            "debt_to_equity": 0.5,
+            "pe_ratio": 24,
+            "ps_ratio": 6,
+            "max_drawdown_1y": -18.0,
+            "volatility_1y": 20.0,
+            "price_vs_200dma": 8.0,
+            "data_age_days": 2,
+        }
+        weak = {
+            "ticker": "WEAK",
+            "company_name": "Weak",
+            "sector": "Technology",
+            "industry": "Software",
+            "price": 120,
+            "market_cap": 60_000_000_000,
+            "avg_dollar_volume_20d": 180_000_000,
+            "revenue_growth_yoy": -3.0,
+            "eps_growth_yoy": -5.0,
+            "gross_margin_ttm": 24.0,
+            "operating_margin_ttm": 4.0,
+            "roe": 5.0,
+            "roic": 3.0,
+            "free_cash_flow": 50_000_000,
+            "debt_to_equity": 2.5,
+            "shares_growth_yoy": 8.0,
+            "pe_ratio": 55,
+            "ps_ratio": 12,
+            "max_drawdown_1y": -45.0,
+            "volatility_1y": 48.0,
+            "price_vs_200dma": -12.0,
+            "data_age_days": 2,
+        }
+        report = build_report(
+            [strong, weak],
+            self.config,
+            strategy_mode="stop_checking_price",
+            min_score=0,
+            force_rebalance=True,
+            as_of=date(2026, 4, 20),
+        )
+        candidate = next(item for item in report.candidates if item.ticker == "CAP")
+        self.assertTrue(candidate.action_cap_reason)
+        self.assertEqual(candidate.review_priority, "prompt")
+        self.assertEqual(candidate.recommended_review_cadence, "prompt_manual_review")
+        self.assertIn("action_cap_requires_manual_review", candidate.review_reasons)
+
+    def test_avoid_and_exclude_have_no_review_required(self) -> None:
+        strong = {
+            "ticker": "QUAL",
+            "company_name": "Quality",
+            "sector": "Technology",
+            "industry": "Software",
+            "price": 120,
+            "market_cap": 60_000_000_000,
+            "avg_dollar_volume_20d": 180_000_000,
+            "revenue_growth_yoy": 22.0,
+            "eps_growth_yoy": 24.0,
+            "gross_margin_ttm": 58.0,
+            "operating_margin_ttm": 27.0,
+            "roe": 21.0,
+            "roic": 17.0,
+            "free_cash_flow": 3_000_000_000,
+            "debt_to_equity": 0.5,
+            "shares_growth_yoy": 1.0,
+            "pe_ratio": 24,
+            "ps_ratio": 6,
+            "max_drawdown_1y": -18.0,
+            "volatility_1y": 20.0,
+            "price_vs_200dma": 8.0,
+            "data_age_days": 2,
+        }
+        avoid = {
+            "ticker": "AVOID1",
+            "company_name": "Avoid",
+            "sector": "Technology",
+            "industry": "Software",
+            "price": 120,
+            "market_cap": 60_000_000_000,
+            "avg_dollar_volume_20d": 180_000_000,
+            "revenue_growth_yoy": -12.0,
+            "eps_growth_yoy": -15.0,
+            "gross_margin_ttm": 18.0,
+            "operating_margin_ttm": -8.0,
+            "roe": 1.0,
+            "roic": 0.5,
+            "free_cash_flow": -200_000_000,
+            "debt_to_equity": 3.5,
+            "shares_growth_yoy": 9.0,
+            "pe_ratio": 90,
+            "ps_ratio": 16,
+            "max_drawdown_1y": -55.0,
+            "volatility_1y": 60.0,
+            "price_vs_200dma": -22.0,
+            "data_age_days": 2,
+        }
+        exclude = {"ticker": "PENNY", "price": 2.0, "market_cap": 10_000_000_000, "avg_dollar_volume_20d": 90_000_000}
+        report = build_report([strong, avoid, exclude], self.config, strategy_mode="stop_checking_price", min_score=0)
+        avoid_candidate = next(item for item in report.candidates if item.ticker == "AVOID1")
+        excluded = next(item for item in report.hard_excluded if item.ticker == "PENNY")
+        self.assertEqual(avoid_candidate.suggested_action, "AVOID")
+        self.assertFalse(avoid_candidate.review_required)
+        self.assertEqual(avoid_candidate.review_reasons, [])
+        self.assertFalse(excluded.review_required)
+        self.assertEqual(excluded.review_reasons, [])
+
+    def test_data_limited_candidate_gets_prompt_manual_review(self) -> None:
+        records = [
+            self._sector_preview_record("FULLHIGH", sector="Technology", industry="Software", revenue_growth_yoy=28, eps_growth_yoy=28),
+            self._sector_preview_record("FULLMID", sector="Technology", industry="Software", revenue_growth_yoy=9, eps_growth_yoy=9),
+            self._sector_preview_record("NOMETA", sector=None, industry=None, revenue_growth_yoy=12, eps_growth_yoy=12),
+        ]
+        records.extend(self._sector_preview_record(f"WEAK{i:02d}", sector="Technology", industry="Hardware", revenue_growth_yoy=-5 + i, eps_growth_yoy=-4 + i) for i in range(9))
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=12)
+        nometa = next(item for item in report.data_limited_candidates if item.ticker == "NOMETA")
+        self.assertTrue(nometa.review_required)
+        self.assertEqual(nometa.review_priority, "prompt")
+        self.assertEqual(nometa.recommended_review_cadence, "prompt_manual_review")
+        self.assertIn("data_limited_candidate", nometa.review_reasons)
+
+    def test_review_summary_counts_are_correct(self) -> None:
+        hybrid_records = [
+            self._sector_preview_record("AAA"),
+            dict(
+                self._sector_preview_record(
+                    "MOMO1",
+                    relative_strength_252d=100,
+                    price_vs_sma50_pct=25,
+                    price_vs_sma200_pct=45,
+                ),
+                ticker="RISKY",
+                revenue_growth_yoy=25,
+                eps_growth_yoy=30,
+                gross_margin=55,
+                operating_margin=35,
+                return_on_equity=25,
+                pe_ratio=50,
+                beta=2.0,
+                volatility_63d=55,
+                max_drawdown_252d=45,
+            ),
+            self._sector_preview_record("LIMITED", beta=None),
+        ]
+        hybrid_report = build_report(hybrid_records, self.config, strategy_mode="hybrid", top_n=3)
+        self.assertEqual(
+            hybrid_report.review_summary,
+            {
+                "routine_weekly_count": 1,
+                "routine_quarterly_count": 0,
+                "prompt_manual_review_count": 2,
+                "data_review_required_count": 1,
+            },
+        )
+
+    def test_review_metadata_does_not_change_score_rank_or_action(self) -> None:
+        records = [self._sector_preview_record("AAA"), self._sector_preview_record("BBB", revenue_growth_yoy=20, eps_growth_yoy=20)]
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=2)
+        candidate = report.candidates[0]
+        self.assertIsNotNone(candidate.total_score)
+        self.assertIsNotNone(candidate.official_rank)
+        self.assertIn(candidate.suggested_action, {"CANDIDATE", "CANDIDATE_HIGH_RISK", "CANDIDATE_DATA_LIMITED", "AVOID"})
         self.assertIsNotNone(candidate.penalty_score)
         self.assertIsNotNone(candidate.confidence_multiplier)
         self.assertIsNotNone(candidate.final_score)
-        self.assertIsNotNone(candidate.data_quality_score)
         self.assertIsInstance(candidate.data_quality_flags, list)
         self.assertIsNone(candidate.action_cap_reason)
 

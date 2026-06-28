@@ -1174,9 +1174,9 @@ class ScreenerApp(tk.Tk):
             self.snapshot_label.config(text=f"快照：{bundle.as_of} | {bundle.fetched_at}")
         else:
             self.metric_snapshot.value_label.config(text="手動資料")
-        review_text = "是" if report.review_mode == "quarterly_rebalance" else "否"
+        review_text = "是" if report.review_window_mode == "quarterly_rebalance" else "否"
         self._set_status(
-            f"完成。策略模式：{report.strategy_mode}；季度檢查：{review_text}；硬篩通過 {report.hard_pass_count} 檔；目前只顯示前 {len(report.candidates)} 名。"
+            f"完成。策略模式：{report.strategy_mode}；人工審查模式：{report.review_mode}；季度檢查：{review_text}；硬篩通過 {report.hard_pass_count} 檔；目前只顯示前 {len(report.candidates)} 名。"
         )
 
         rows = self.tree.get_children()
@@ -1269,6 +1269,11 @@ class ScreenerApp(tk.Tk):
         ]
         if item.suggested_action:
             lines.insert(2, f"動作：{item.suggested_action}")
+        lines.insert(3, f"Review priority：{item.review_priority}")
+        lines.insert(4, f"Review cadence：{item.recommended_review_cadence or 'N/A'}")
+        lines.insert(5, f"Review required：{item.review_required}")
+        if item.review_reasons:
+            lines.insert(6, f"Review reasons：{'；'.join(item.review_reasons)}")
         for reason in item.reasons:
             lines.append(f"- {reason}")
         if item.risk_warnings:
@@ -1326,7 +1331,11 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
     lines = [
         f"來源：{source_name}",
         f"策略模式：{report.strategy_mode}",
-        f"季度檢查：{'是' if report.review_mode == 'quarterly_rebalance' else '否'}",
+        f"review_mode：{report.review_mode}",
+        f"季度檢查：{'是' if report.review_window_mode == 'quarterly_rebalance' else '否'}",
+        f"review_policy_version：{report.review_policy_version}",
+        f"no_automatic_trading：{report.no_automatic_trading}",
+        f"review_summary：{report.review_summary}",
         f"輸入 {report.universe_size} 檔",
         f"min_score：{report.min_score if report.min_score is not None else '未設定'}",
         f"effective_min_score_source：{report.effective_min_score_source}",
@@ -1425,6 +1434,11 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
         lines.append(f"   Peer reason：{item.sector_relative_peer_reason or 'N/A'}")
         if item.suggested_action:
             lines.append(f"   動作：{item.suggested_action}")
+        lines.append(f"   Review priority：{item.review_priority}")
+        lines.append(f"   Review cadence：{item.recommended_review_cadence or 'N/A'}")
+        lines.append(f"   Review required：{item.review_required}")
+        if item.review_reasons:
+            lines.append(f"   Review reasons：{'；'.join(item.review_reasons)}")
         if item.confidence_score is not None:
             lines.append(f"   信心：{item.confidence_label} ({item.confidence_score})")
         if item.data_quality_score is not None:
@@ -1499,6 +1513,8 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
                 f"- {item.ticker}｜score {item.total_score if item.total_score is not None else 'N/A'}"
                 f"｜official source {item.official_score_source or 'N/A'}"
                 f"｜action {item.suggested_action or 'N/A'}"
+                f"｜review {item.review_priority}/{item.recommended_review_cadence or 'N/A'}"
+                f"｜reasons {'；'.join(item.review_reasons) or 'N/A'}"
             )
     return "\n".join(lines)
 

@@ -809,6 +809,10 @@ class ScreenResult:
     legacy_fundamental_score: Optional[float] = None
     legacy_momentum_score: Optional[float] = None
     legacy_risk_safety_score: Optional[float] = None
+    review_required: bool = False
+    review_priority: str = "routine"
+    recommended_review_cadence: str = ""
+    review_reasons: List[str] = field(default_factory=list)
 
     @property
     def is_candidate(self) -> bool:
@@ -821,10 +825,14 @@ class ScreeningReport:
     config: ScreenConfig
     strategy_mode: str
     review_mode: str
+    review_window_mode: str
     hard_pass_count: int
     candidates: List[ScreenResult]
     excluded: List[ScreenResult]
     universe_size: int
+    review_policy_version: str = "v1"
+    no_automatic_trading: bool = True
+    review_summary: Dict[str, int] = field(default_factory=dict)
     data_limited_candidates: List[ScreenResult] = field(default_factory=list)
     hard_excluded: List[ScreenResult] = field(default_factory=list)
     soft_penalties: List[Dict[str, Any]] = field(default_factory=list)
@@ -883,6 +891,102 @@ class ScreeningReport:
     market_regime: str = MARKET_REGIME_NEUTRAL
     market_regime_status: str = MARKET_REGIME_STATUS_INSUFFICIENT
     market_regime_signals: Dict[str, str] = field(default_factory=dict)
+
+
+def _dedupe_reason_sequence(values: Iterable[str]) -> List[str]:
+    ordered: List[str] = []
+    seen = set()
+    for value in values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
+
+
+def _apply_review_metadata(
+    item: ScreenResult,
+    *,
+    is_data_limited: bool,
+) -> None:
+    action = item.suggested_action or ""
+    if action in {"AVOID", "EXCLUDE"}:
+        item.review_required = False
+        item.review_priority = "routine"
+        item.recommended_review_cadence = ""
+        item.review_reasons = []
+        return
+
+    baseline_reasons: List[str] = []
+    review_required = True
+    review_priority = "routine"
+    recommended_review_cadence = ""
+
+    if is_data_limited:
+        review_priority = "prompt"
+        recommended_review_cadence = "prompt_manual_review"
+        baseline_reasons.append("data_limited_candidate")
+    elif item.strategy_mode == "hybrid":
+        if action == "CANDIDATE_HIGH_RISK":
+            review_priority = "prompt"
+            recommended_review_cadence = "prompt_manual_review"
+            baseline_reasons.append("high_risk_candidate")
+        elif action == "CANDIDATE_DATA_LIMITED":
+            review_priority = "prompt"
+            recommended_review_cadence = "prompt_manual_review"
+            baseline_reasons.append("data_limited_candidate")
+        elif action == "CANDIDATE":
+            review_priority = "routine"
+            recommended_review_cadence = "weekly"
+            baseline_reasons.append("hybrid_weekly_candidate_review")
+    elif item.strategy_mode == "stop_checking_price":
+        if action == "WATCHLIST_DATA_INSUFFICIENT":
+            review_priority = "prompt"
+            recommended_review_cadence = "prompt_manual_review"
+            baseline_reasons.append("data_insufficient")
+        elif action in {"WATCHLIST", "WATCHLIST_HIGH_QUALITY", "HOLD_OR_REVIEW", "BUY_CANDIDATE"}:
+            review_priority = "routine"
+            recommended_review_cadence = "quarterly"
+            baseline_reasons.append("stop_mode_quarterly_review")
+
+    if item.action_cap_reason:
+        review_priority = "prompt"
+        recommended_review_cadence = "prompt_manual_review"
+        baseline_reasons.append("action_cap_requires_manual_review")
+
+    if item.risk_safety_score is not None and item.risk_safety_score < 40:
+        review_priority = "prompt"
+        recommended_review_cadence = "prompt_manual_review"
+        baseline_reasons.append("low_risk_safety_score")
+
+    item.review_required = review_required
+    item.review_priority = review_priority
+    item.recommended_review_cadence = recommended_review_cadence
+    item.review_reasons = _dedupe_reason_sequence(baseline_reasons)
+
+
+def _build_review_summary(items: Sequence[ScreenResult]) -> Dict[str, int]:
+    routine_weekly_count = 0
+    routine_quarterly_count = 0
+    prompt_manual_review_count = 0
+    data_review_required_count = 0
+    for item in items:
+        if not item.review_required:
+            continue
+        if item.recommended_review_cadence == "weekly":
+            routine_weekly_count += 1
+        elif item.recommended_review_cadence == "quarterly":
+            routine_quarterly_count += 1
+        elif item.recommended_review_cadence == "prompt_manual_review":
+            prompt_manual_review_count += 1
+        if any(reason in {"data_limited_candidate", "data_insufficient"} for reason in item.review_reasons):
+            data_review_required_count += 1
+    return {
+        "routine_weekly_count": routine_weekly_count,
+        "routine_quarterly_count": routine_quarterly_count,
+        "prompt_manual_review_count": prompt_manual_review_count,
+        "data_review_required_count": data_review_required_count,
+    }
 
 
 def _canonicalize_record(payload: Dict[str, Any]) -> StockRecord:
@@ -3131,7 +3235,7 @@ def screen_records(
     strategy_mode = _normalize_strategy_mode(strategy_mode)
     effective_min_score, effective_min_score_source = _resolve_effective_min_score(strategy_mode, min_score)
     review_flag = force_rebalance or is_rebalance_window(as_of)
-    review_mode = "quarterly_rebalance" if strategy_mode == "stop_checking_price" and review_flag else "watchlist_only"
+    review_window_mode = "quarterly_rebalance" if strategy_mode == "stop_checking_price" and review_flag else "watchlist_only"
     scored = [
         score_record(record, config, strategy_mode=strategy_mode, as_of=as_of, force_rebalance=force_rebalance)
         for record in records
@@ -3237,6 +3341,11 @@ def screen_records(
         item.official_rank = index
     for item in data_limited_candidates:
         item.official_rank = None
+    for item in displayed_candidates:
+        _apply_review_metadata(item, is_data_limited=False)
+    for item in data_limited_candidates:
+        _apply_review_metadata(item, is_data_limited=True)
+    review_summary = _build_review_summary([*displayed_candidates, *data_limited_candidates])
     ranking_diagnostics = build_ranking_diagnostics(displayed_candidates)
     soft_penalties: List[Dict[str, Any]] = []
     missing_data_warnings: List[Dict[str, Any]] = []
@@ -3270,11 +3379,15 @@ def screen_records(
         as_of=as_of,
         config=config,
         strategy_mode=strategy_mode,
-        review_mode=review_mode,
+        review_mode="manual_decision_support",
+        review_window_mode=review_window_mode,
         hard_pass_count=hard_pass_count,
         candidates=displayed_candidates,
         excluded=excluded,
         universe_size=len(scored),
+        review_policy_version="v1",
+        no_automatic_trading=True,
+        review_summary=review_summary,
         data_limited_candidates=data_limited_candidates,
         hard_excluded=[item for item in excluded if item.hard_exclusion is not False],
         soft_penalties=soft_penalties,
@@ -3342,6 +3455,10 @@ def _render_markdown(report: ScreeningReport) -> str:
     lines.append("")
     lines.append(f"- 策略模式：{report.strategy_mode}")
     lines.append(f"- 檢查模式：{report.review_mode}")
+    lines.append(f"- 季度檢查模式：{report.review_window_mode}")
+    lines.append(f"- review_policy_version：{report.review_policy_version}")
+    lines.append(f"- no_automatic_trading：{json.dumps(report.no_automatic_trading, ensure_ascii=False)}")
+    lines.append(f"- review_summary：{json.dumps(report.review_summary, ensure_ascii=False)}")
     lines.append("")
     lines.append(f"- 輸入 {report.universe_size} 檔")
     lines.append(f"- min_score：{report.min_score if report.min_score is not None else '未設定'}")
@@ -3423,13 +3540,13 @@ def _render_markdown(report: ScreeningReport) -> str:
     lines.append("")
     lines.append("## 候選名單")
     lines.append("")
-    lines.append("| 排名 | Ticker | 總分 | Base score | Regime delta | Official source | Legacy score | Sector-aware preview | Peer source | Peer count | Peer reason | 資料品質 | 動作 | 基本面 | 動量 | 風險安全 | 主要理由 | 風險警示 |")
-    lines.append("| --- | --- | ---: | ---: | ---: | --- | ---: | --- | --- | ---: | --- | ---: | --- | ---: | ---: | ---: | --- | --- |")
+    lines.append("| 排名 | Ticker | 總分 | Base score | Regime delta | Official source | Legacy score | Sector-aware preview | Peer source | Peer count | Peer reason | 資料品質 | 動作 | Review priority | Review cadence | Review reasons | 基本面 | 動量 | 風險安全 | 主要理由 | 風險警示 |")
+    lines.append("| --- | --- | ---: | ---: | ---: | --- | ---: | --- | --- | ---: | --- | ---: | --- | --- | --- | --- | ---: | ---: | ---: | --- | --- |")
     for index, item in enumerate(report.candidates, start=1):
         warnings = "；".join(item.risk_warnings) if item.risk_warnings else "無"
         reasons = "；".join(item.reasons)
         lines.append(
-            "| {rank} | {ticker} | {total} | {base_total} | {regime_delta} | {official_source} | {legacy_total} | {sector_preview} | {peer_source} | {peer_count} | {peer_reason} | {data_quality} | {action} | {fundamental} | {momentum} | {risk} | {reasons} | {warnings} |".format(
+            "| {rank} | {ticker} | {total} | {base_total} | {regime_delta} | {official_source} | {legacy_total} | {sector_preview} | {peer_source} | {peer_count} | {peer_reason} | {data_quality} | {action} | {review_priority} | {review_cadence} | {review_reasons} | {fundamental} | {momentum} | {risk} | {reasons} | {warnings} |".format(
                 rank=index,
                 ticker=item.ticker,
                 total=item.total_score if item.total_score is not None else "",
@@ -3443,6 +3560,9 @@ def _render_markdown(report: ScreeningReport) -> str:
                 peer_reason=item.sector_relative_peer_reason or "",
                 data_quality=item.data_quality_score if item.data_quality_score is not None else "",
                 action=item.suggested_action or "",
+                review_priority=item.review_priority or "",
+                review_cadence=item.recommended_review_cadence or "",
+                review_reasons="；".join(item.review_reasons),
                 fundamental=item.factor_scores.get("fundamental") or "",
                 momentum=item.factor_scores.get("momentum") or "",
                 risk=item.factor_scores.get("risk_safety") or "",
@@ -3494,14 +3614,17 @@ def _render_markdown(report: ScreeningReport) -> str:
         lines.append("")
         lines.append("## Data-limited Candidates")
         lines.append("")
-        lines.append("| Ticker | Official source | 總分 | Legacy score | Action | 原因 |")
-        lines.append("| --- | --- | ---: | ---: | --- | --- |")
+        lines.append("| Ticker | Official source | 總分 | Legacy score | Action | Review priority | Review cadence | Review reasons | 原因 |")
+        lines.append("| --- | --- | ---: | ---: | --- | --- | --- | --- | --- |")
         for item in report.data_limited_candidates:
             lines.append(
                 f"| {item.ticker} | {item.official_score_source or ''} | "
                 f"{item.total_score if item.total_score is not None else ''} | "
                 f"{item.legacy_total_score if item.legacy_total_score is not None else ''} | "
                 f"{item.suggested_action or ''} | "
+                f"{item.review_priority or ''} | "
+                f"{item.recommended_review_cadence or ''} | "
+                f"{'；'.join(item.review_reasons)} | "
                 f"{item.action_cap_reason or '缺少 sector / industry metadata，僅列為 data-limited'} |"
             )
     return "\n".join(lines)
@@ -3511,6 +3634,10 @@ def _render_json(report: ScreeningReport) -> str:
     payload = {
         "strategy_mode": report.strategy_mode,
         "review_mode": report.review_mode,
+        "review_window_mode": report.review_window_mode,
+        "review_policy_version": report.review_policy_version,
+        "no_automatic_trading": report.no_automatic_trading,
+        "review_summary": report.review_summary,
         "universe_size": report.universe_size,
         "hard_pass_count": report.hard_pass_count,
         "candidate_count": len(report.candidates),
@@ -3604,6 +3731,10 @@ def _render_json(report: ScreeningReport) -> str:
                 "normalization_notes": item.normalization_notes,
                 "company_snapshot": item.company_snapshot,
                 "suggested_action": item.suggested_action,
+                "review_required": item.review_required,
+                "review_priority": item.review_priority,
+                "recommended_review_cadence": item.recommended_review_cadence,
+                "review_reasons": item.review_reasons,
                 "action_cap_reason": item.action_cap_reason,
                 "hard_exclusion": item.hard_exclusion,
                 "sector_relative_score_preview": item.sector_relative_score_preview,
@@ -3635,6 +3766,10 @@ def _render_json(report: ScreeningReport) -> str:
                 "momentum_score": item.momentum_score,
                 "risk_safety_score": item.risk_safety_score,
                 "suggested_action": item.suggested_action,
+                "review_required": item.review_required,
+                "review_priority": item.review_priority,
+                "recommended_review_cadence": item.recommended_review_cadence,
+                "review_reasons": item.review_reasons,
                 "action_cap_reason": item.action_cap_reason,
                 "sector_relative_score_preview": item.sector_relative_score_preview,
                 "sector_relative_peer_source": item.sector_relative_peer_source,

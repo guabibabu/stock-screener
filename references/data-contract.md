@@ -241,6 +241,22 @@ Official scoring provenance is separate from preview peer provenance:
 
 When `sector_aware_status = enabled` and a stock falls back to `official_score_source = legacy_missing_metadata`, it does not enter the official ranked candidate pool. Those names appear separately as `data_limited_candidates`, with `official_rank = null`.
 
+## Review Metadata Output
+
+All reports also expose manual-review metadata without changing score, rank, or action:
+
+- report-level: `review_policy_version`, `review_mode`, `no_automatic_trading`, `review_summary`
+- candidate-level: `review_required`, `review_priority`, `recommended_review_cadence`, `review_reasons`
+
+`review_summary` counts are:
+
+- `routine_weekly_count`
+- `routine_quarterly_count`
+- `prompt_manual_review_count`
+- `data_review_required_count`
+
+`data_limited_candidates` are included in these counts and must still carry prompt manual-review metadata.
+
 `sector_relative_peer_count` is the number of records used for the percentile comparison. In universe fallback cases, this is the full candidate universe count.
 
 `sector_relative_factor_scores` can include:

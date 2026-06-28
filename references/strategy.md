@@ -18,6 +18,40 @@ The default report is fixed:
 - `ranking_style`
 - `top_n` factor averages
 - high-risk / expensive / high-volatility / drawdown / missing-data candidate counts
+- `review_policy_version`
+- `review_mode`
+- `review_summary`
+
+## Manual Review Discipline
+
+This tool is fixed as a manual decision-support workflow. It does not emit automatic trading instructions, and review metadata is report-layer guidance only.
+
+Report-level fields:
+
+- `review_policy_version = v1`
+- `review_mode = manual_decision_support`
+- `no_automatic_trading = true`
+- `review_summary`
+
+Candidate-level fields:
+
+- `review_required`
+- `review_priority`
+- `recommended_review_cadence`
+- `review_reasons`
+
+Rules:
+
+- Hybrid `CANDIDATE` => routine weekly review, reason `hybrid_weekly_candidate_review`
+- Hybrid `CANDIDATE_HIGH_RISK` => prompt manual review, reason `high_risk_candidate`
+- Hybrid `CANDIDATE_DATA_LIMITED` => prompt manual review, reason `data_limited_candidate`
+- Stop `WATCHLIST` / `WATCHLIST_HIGH_QUALITY` => routine quarterly review, reason `stop_mode_quarterly_review`
+- Stop `BUY_CANDIDATE` / `HOLD_OR_REVIEW` => still routine quarterly review, reason `stop_mode_quarterly_review`
+- Stop `WATCHLIST_DATA_INSUFFICIENT` => prompt manual review, reason `data_insufficient`
+- Any non-`AVOID` / non-`EXCLUDE` candidate with `action_cap_reason` => prompt manual review, reason `action_cap_requires_manual_review`
+- Any non-`AVOID` / non-`EXCLUDE` candidate with `risk_safety_score < 40` => prompt manual review, reason `low_risk_safety_score`
+- `data_limited_candidates` always stay outside the official ranked pool and must still be marked for prompt manual review with `data_limited_candidate`
+- `AVOID` / `EXCLUDE` => `review_required = false`
 
 ## Hard Filters
 

@@ -177,6 +177,10 @@ def _result_to_payload(item: Any) -> Dict[str, Any]:
         "confidence_notes": item.confidence_notes,
         "penalties": item.penalties,
         "suggested_action": item.suggested_action,
+        "review_required": item.review_required,
+        "review_priority": item.review_priority,
+        "recommended_review_cadence": item.recommended_review_cadence,
+        "review_reasons": item.review_reasons,
         "action_cap_reason": item.action_cap_reason,
         "company_snapshot": item.company_snapshot,
         "excluded_reason": item.excluded_reason,
@@ -200,6 +204,10 @@ def _report_to_payload(report: Any, *, source_name: str, bundle: Any = None) -> 
         "source_name": source_name,
         "strategy_mode": report.strategy_mode,
         "review_mode": report.review_mode,
+        "review_window_mode": report.review_window_mode,
+        "review_policy_version": report.review_policy_version,
+        "no_automatic_trading": report.no_automatic_trading,
+        "review_summary": report.review_summary,
         "universe_size": report.universe_size,
         "hard_pass_count": report.hard_pass_count,
         "candidate_count": len(report.candidates),
@@ -515,12 +523,13 @@ INDEX_HTML = r"""<!doctype html>
                 <th>總分</th>
                 <th>Sector Preview</th>
                 <th>動作</th>
+                <th>人工審查</th>
                 <th>入選理由</th>
                 <th>風險提醒</th>
               </tr>
             </thead>
             <tbody id="rows">
-              <tr><td colspan="6" class="empty">尚未產生結果。</td></tr>
+              <tr><td colspan="8" class="empty">尚未產生結果。</td></tr>
             </tbody>
           </table>
         </div>
@@ -641,12 +650,12 @@ INDEX_HTML = r"""<!doctype html>
       setMetric('mPenalty', report.soft_penalty_count);
       setMetric('mMissing', report.missing_data_count);
       setMetric('mFetchFailed', report.fetch_failed_count);
-      $('modePill').textContent = `${report.strategy_mode}｜${report.ranking_style}｜${report.sector_aware_status}｜${report.market_regime}/${report.market_regime_status}｜min_score ${report.min_score ?? '未設定'}｜${report.effective_min_score_source}`;
+      $('modePill').textContent = `${report.strategy_mode}｜${report.review_mode}｜${report.ranking_style}｜${report.sector_aware_status}｜${report.market_regime}/${report.market_regime_status}｜min_score ${report.min_score ?? '未設定'}｜${report.effective_min_score_source}`;
 
       const body = $('rows');
       body.innerHTML = '';
       if (!report.candidates.length) {
-        body.innerHTML = '<tr><td colspan="7" class="empty">沒有符合條件的候選股票。</td></tr>';
+        body.innerHTML = '<tr><td colspan="8" class="empty">沒有符合條件的候選股票。</td></tr>';
       } else {
         report.candidates.forEach((item, index) => {
           const tr = document.createElement('tr');
@@ -656,6 +665,7 @@ INDEX_HTML = r"""<!doctype html>
             <td class="score">${item.total_score ?? ''}</td>
             <td>${formatSectorPreview(item)}</td>
             <td>${item.suggested_action || 'CANDIDATE'}</td>
+            <td>${item.review_priority || 'routine'} / ${item.recommended_review_cadence || 'N/A'}</td>
             <td>${(item.reasons || []).slice(0, 2).join('；') || '等待審核'}</td>
             <td>${(item.risk_warnings || []).slice(0, 2).join('；') || '<span class="ok">無明顯風險</span>'}</td>
           `;
@@ -672,7 +682,11 @@ INDEX_HTML = r"""<!doctype html>
       const lines = [
         `來源：${report.source_name || 'web'}`,
         `策略模式：${report.strategy_mode}`,
-        `季度檢查：${report.review_mode === 'quarterly_rebalance' ? '是' : '否'}`,
+        `review_mode：${report.review_mode}`,
+        `季度檢查：${report.review_window_mode === 'quarterly_rebalance' ? '是' : '否'}`,
+        `review_policy_version：${report.review_policy_version}`,
+        `no_automatic_trading：${report.no_automatic_trading}`,
+        `review_summary：${JSON.stringify(report.review_summary || {})}`,
         `輸入 ${report.universe_size} 檔`,
         `min_score：${report.min_score ?? '未設定'}`,
         `effective_min_score_source：${report.effective_min_score_source}`,
@@ -747,6 +761,10 @@ INDEX_HTML = r"""<!doctype html>
         lines.push(`   Peer count：${item.sector_relative_peer_count ?? 'N/A'}`);
         lines.push(`   Peer reason：${item.sector_relative_peer_reason ?? 'N/A'}`);
         if (item.suggested_action) lines.push(`   動作：${item.suggested_action}`);
+        lines.push(`   Review priority：${item.review_priority || 'routine'}`);
+        lines.push(`   Review cadence：${item.recommended_review_cadence || 'N/A'}`);
+        lines.push(`   Review required：${item.review_required}`);
+        if (item.review_reasons && item.review_reasons.length) lines.push(`   Review reasons：${item.review_reasons.join('；')}`);
         if (item.confidence_score !== null && item.confidence_score !== undefined) {
           lines.push(`   信心：${item.confidence_label || 'N/A'} (${item.confidence_score})`);
         }
@@ -829,6 +847,10 @@ INDEX_HTML = r"""<!doctype html>
         `信心：${item.confidence_label || 'N/A'} (${item.confidence_score ?? 'N/A'})`,
         `資料品質：${item.data_quality_score ?? 'N/A'}`,
         `動作限制：${item.action_cap_reason || '無'}`,
+        `Review priority：${item.review_priority || 'routine'}`,
+        `Review cadence：${item.recommended_review_cadence || 'N/A'}`,
+        `Review required：${item.review_required}`,
+        `Review reasons：${(item.review_reasons && item.review_reasons.length) ? item.review_reasons.join('；') : '無'}`,
         `最終分：${item.final_score}`,
         `Sector-aware preview：${formatSectorPreview(item) || 'N/A'}`,
         `Peer source：${formatPeerSource(item) || 'N/A'}`,
