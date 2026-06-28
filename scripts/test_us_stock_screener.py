@@ -8,12 +8,15 @@ import unittest
 from datetime import date, timedelta
 from pathlib import Path
 import sys
+import json
+from unittest import mock
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 import us_stock_screener as screener
+import backtest_us_stock_screener as backtest
 from us_stock_screener import ScreenConfig, build_report, load_records, screen_records
 from fetch_yfinance_snapshot import (
     SnapshotBundle,
@@ -143,6 +146,44 @@ class ScreenerTests(unittest.TestCase):
                 "market_context_source": "test",
             }
         raise ValueError(regime)
+
+    def _backtest_record(self, ticker: str, price: float, **overrides):
+        record = {
+            "ticker": ticker,
+            "sector": "Technology",
+            "industry": "Software",
+            "price": price,
+            "market_cap": 50_000_000_000,
+            "avg_dollar_volume_20d": 100_000_000,
+            "revenue_growth_yoy": 10,
+            "eps_growth_yoy": 10,
+            "gross_margin": 45,
+            "operating_margin": 20,
+            "return_on_equity": 15,
+            "pe_ratio": 25,
+            "ps_ratio": 6,
+            "relative_strength_252d": 70,
+            "price_vs_sma50_pct": 3,
+            "price_vs_sma200_pct": 6,
+            "beta": 1.0,
+            "volatility_63d": 25,
+            "max_drawdown_252d": 15,
+            "data_age_days": 2,
+        }
+        record.update(overrides)
+        return record
+
+    def _write_backtest_snapshot(self, directory: Path, as_of: str, records, benchmarks=None):
+        payload = {
+            "metadata": {
+                "as_of": as_of,
+                "benchmarks": benchmarks or {},
+            },
+            "records": records,
+        }
+        path = directory / f"{as_of}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False))
+        return path
 
     def test_yfinance_snapshot_writes_sector_and_industry_metadata(self) -> None:
         provider = FakeProvider(
@@ -2224,6 +2265,170 @@ class ScreenerTests(unittest.TestCase):
         self.assertEqual(report.market_regime, "neutral")
         self.assertEqual(report.market_regime_status, "insufficient_market_data")
         self.assertTrue(all(item.total_score == item.base_total_score for item in report.candidates))
+
+    def test_backtest_fails_when_filename_date_mismatches_payload_as_of(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            payload = {
+                "metadata": {"as_of": "2026-01-30"},
+                "records": [self._backtest_record("AAA", 100)],
+            }
+            (root / "2026-01-31.json").write_text(json.dumps(payload))
+            with self.assertRaises(ValueError):
+                backtest.load_historical_snapshots(root)
+
+    def test_backtest_monthly_uses_last_available_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_backtest_snapshot(root, "2026-01-10", [self._backtest_record("AAA", 100)])
+            self._write_backtest_snapshot(root, "2026-01-31", [self._backtest_record("AAA", 101)])
+            self._write_backtest_snapshot(root, "2026-02-15", [self._backtest_record("AAA", 102)])
+            self._write_backtest_snapshot(root, "2026-02-28", [self._backtest_record("AAA", 103)])
+            snapshots = backtest.load_historical_snapshots(root)
+            selected = backtest.select_rebalance_snapshots(snapshots, "hybrid")
+            self.assertEqual([item.as_of.isoformat() for item in selected], ["2026-01-31", "2026-02-28"])
+
+    def test_backtest_quarterly_uses_last_available_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_backtest_snapshot(root, "2026-01-31", [self._backtest_record("AAA", 100)])
+            self._write_backtest_snapshot(root, "2026-03-31", [self._backtest_record("AAA", 101)])
+            self._write_backtest_snapshot(root, "2026-04-30", [self._backtest_record("AAA", 102)])
+            self._write_backtest_snapshot(root, "2026-06-30", [self._backtest_record("AAA", 103)])
+            snapshots = backtest.load_historical_snapshots(root)
+            selected = backtest.select_rebalance_snapshots(snapshots, "stop_checking_price")
+            self.assertEqual([item.as_of.isoformat() for item in selected], ["2026-03-31", "2026-06-30"])
+
+    def test_backtest_top_decile_uses_floor_and_minimum_one(self) -> None:
+        portfolios = backtest._configured_portfolios("hybrid", 9)
+        self.assertIn((backtest.TOP_DECILE, 1), portfolios)
+        portfolios = backtest._configured_portfolios("hybrid", 23)
+        self.assertIn((backtest.TOP_DECILE, 2), portfolios)
+
+    def test_backtest_missing_next_price_invalidates_period(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            formation = [
+                self._backtest_record("AAA", 100, relative_strength_252d=90),
+                self._backtest_record("BBB", 100, relative_strength_252d=80),
+            ]
+            next_records = [self._backtest_record("AAA", 110)]
+            self._write_backtest_snapshot(root, "2026-01-31", formation, benchmarks={"SPY": 500})
+            self._write_backtest_snapshot(root, "2026-02-28", next_records, benchmarks={"SPY": 510})
+            snapshots = backtest.load_historical_snapshots(root)
+            summaries = backtest.run_backtest(
+                snapshots,
+                "hybrid",
+                config=self.config,
+                spy_prices={"2026-01-31": 500, "2026-02-28": 510},
+            )
+            top20 = next(item for item in summaries if item.portfolio_name == backtest.TOP_20)
+            self.assertEqual(top20.missing_return_period_count, 1)
+            self.assertEqual(top20.missing_return_ticker_count, 1)
+            self.assertEqual(top20.missing_return_tickers, ["BBB"])
+            self.assertIsNone(top20.periods[0].return_value)
+            self.assertIsNone(top20.cagr)
+
+    def test_backtest_turnover_uses_half_absolute_weight_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            jan = [
+                self._backtest_record("AAA", 100, relative_strength_252d=90),
+                self._backtest_record("BBB", 100, relative_strength_252d=80),
+                self._backtest_record("CCC", 100, relative_strength_252d=70),
+            ]
+            feb = [
+                self._backtest_record("CCC", 100, relative_strength_252d=95),
+                self._backtest_record("BBB", 100, relative_strength_252d=85),
+                self._backtest_record("AAA", 100, relative_strength_252d=65),
+            ]
+            mar = [
+                self._backtest_record("CCC", 110, relative_strength_252d=95),
+                self._backtest_record("DDD", 100, relative_strength_252d=90),
+                self._backtest_record("BBB", 110, relative_strength_252d=80),
+            ]
+            self._write_backtest_snapshot(root, "2026-01-31", jan, benchmarks={"SPY": 500})
+            self._write_backtest_snapshot(root, "2026-02-28", feb, benchmarks={"SPY": 510})
+            self._write_backtest_snapshot(root, "2026-03-31", mar, benchmarks={"SPY": 520})
+            snapshots = backtest.load_historical_snapshots(root)
+            summaries = backtest.run_backtest(
+                snapshots,
+                "hybrid",
+                config=self.config,
+                spy_prices={"2026-01-31": 500, "2026-02-28": 510, "2026-03-31": 520},
+            )
+            top_decile = next(item for item in summaries if item.portfolio_name == backtest.TOP_DECILE)
+            self.assertIsNone(top_decile.periods[0].turnover)
+            self.assertEqual(top_decile.periods[1].turnover, 1.0)
+
+    def test_backtest_spy_benchmark_missing_price_is_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_backtest_snapshot(root, "2026-01-31", [self._backtest_record("AAA", 100)])
+            self._write_backtest_snapshot(root, "2026-02-28", [self._backtest_record("AAA", 110)])
+            snapshots = backtest.load_historical_snapshots(root)
+            summaries = backtest.run_backtest(
+                snapshots,
+                "hybrid",
+                config=self.config,
+                spy_prices={"2026-01-31": 500},
+            )
+            top20 = next(item for item in summaries if item.portfolio_name == backtest.TOP_20)
+            self.assertIsNone(top20.periods[0].benchmark_spy_return)
+            self.assertEqual(top20.periods[0].benchmark_missing_reason, "missing_spy_price")
+
+    def test_backtest_equal_weight_universe_uses_only_stocks_with_next_price(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            jan = [
+                self._backtest_record("AAA", 100),
+                self._backtest_record("BBB", 100),
+                self._backtest_record("CCC", 100),
+            ]
+            feb = [
+                self._backtest_record("AAA", 110),
+                self._backtest_record("BBB", 90),
+            ]
+            self._write_backtest_snapshot(root, "2026-01-31", jan, benchmarks={"SPY": 500})
+            self._write_backtest_snapshot(root, "2026-02-28", feb, benchmarks={"SPY": 510})
+            snapshots = backtest.load_historical_snapshots(root)
+            summaries = backtest.run_backtest(
+                snapshots,
+                "hybrid",
+                config=self.config,
+                spy_prices={"2026-01-31": 500, "2026-02-28": 510},
+            )
+            top20 = next(item for item in summaries if item.portfolio_name == backtest.TOP_20)
+            self.assertEqual(top20.periods[0].universe_benchmark_eligible_count, 2)
+            self.assertAlmostEqual(top20.periods[0].benchmark_universe_return, 0.0)
+
+    def test_backtest_outputs_include_research_flags_and_do_not_use_network(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            out = root / "outputs" / "hybrid-backtest"
+            self._write_backtest_snapshot(root, "2026-01-31", [self._backtest_record("AAA", 100)], benchmarks={"SPY": 500})
+            self._write_backtest_snapshot(root, "2026-02-28", [self._backtest_record("AAA", 110)], benchmarks={"SPY": 510})
+            with mock.patch("socket.socket", side_effect=AssertionError("network should not be used")):
+                exit_code = backtest.main(
+                    [
+                        "--snapshots-dir",
+                        str(root),
+                        "--strategy-mode",
+                        "hybrid",
+                        "--output-prefix",
+                        str(out),
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            summary_csv = out.with_suffix(".summary.csv").read_text()
+            markdown = out.with_suffix(".md").read_text()
+            self.assertIn("research_only", summary_csv)
+            self.assertIn("not_point_in_time_accurate", summary_csv)
+            self.assertIn("survivorship_bias_possible", summary_csv)
+            self.assertIn("not_for_automated_trading", summary_csv)
+            self.assertIn("missing_return_policy", summary_csv)
+            self.assertIn("research_only: `true`", markdown)
+            self.assertIn("missing_return_policy: `invalidate_portfolio_period`", markdown)
 
     def test_web_parse_uploaded_ticker_csv(self) -> None:
         kind, rows = parse_uploaded_content("watchlist.csv", "ticker\nAAPL\nMSFT\n")

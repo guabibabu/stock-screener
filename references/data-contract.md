@@ -53,6 +53,42 @@ If the screener is run without an explicit sidecar, it must fall back to:
 - `market_regime = neutral`
 - `market_regime_status = insufficient_market_data`
 
+## Historical Backtest Snapshot Format
+
+Phase 4 backtesting only reads local historical snapshots from a folder of dated JSON files:
+
+- `YYYY-MM-DD.json`
+
+Fixed rules:
+
+- The filename date is the only official backtest date source.
+- If `metadata.as_of` is present, it must exactly match the filename date.
+- Backtests must not call yfinance or any other network source.
+- Backtests must not backfill earlier snapshots with fields only known from later snapshots.
+
+Minimum structure:
+
+```json
+{
+  "metadata": {
+    "as_of": "2026-01-31",
+    "benchmarks": {
+      "SPY": 610.25
+    }
+  },
+  "records": [
+    {
+      "ticker": "AAPL",
+      "price": 225.3,
+      "market_cap": 3300000000000,
+      "avg_dollar_volume_20d": 950000000
+    }
+  ]
+}
+```
+
+If benchmark metadata is not embedded in the snapshot, the backtest can instead read a separate local `spy_prices.json`.
+
 ## Recommended Inputs
 
 | Field | Meaning |
@@ -208,6 +244,34 @@ Official scoring provenance is separate from preview peer provenance:
 - `momentum`
 - `risk`
 - `risk_safety`
+
+## Backtest Output Contract
+
+The research-only backtest script writes:
+
+- `*.summary.csv`
+- `*.periods.csv`
+- `*.md`
+
+Every CSV and Markdown report must include these fixed flags:
+
+- `research_only = true`
+- `not_point_in_time_accurate = true`
+- `survivorship_bias_possible = true`
+- `not_for_automated_trading = true`
+- `missing_return_policy = invalidate_portfolio_period`
+
+Required backtest disclosure fields:
+
+- `missing_return_period_count`
+- `missing_return_ticker_count`
+- `missing_return_tickers`
+
+When a holding is missing next-period price:
+
+- that ticker is listed in `missing_return_tickers`
+- the portfolio period return becomes `null`
+- that period is excluded from CAGR, Sharpe, Sortino, volatility, drawdown, and hit-rate calculations
 
 ## Hard-Filter Flags
 

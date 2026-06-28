@@ -258,6 +258,78 @@ Phase 2D makes sector-relative percentile scoring the official factor model:
 
 Candidate-level sector-aware fields:
 
+## Backtest / Validation Framework
+
+Phase 4 backtesting is research-only. It exists to compare ranking behavior over historical local snapshots. It is not a trading engine and must not connect to broker APIs or intraday feeds.
+
+### Historical Inputs
+
+- Use local dated snapshots only: `YYYY-MM-DD.json`
+- The filename date is the backtest date
+- If `metadata.as_of` exists, it must match the filename date
+- No network calls are allowed during backtest runs
+
+### Rebalance Rules
+
+Hybrid:
+
+- monthly rebalance
+- use the last available snapshot in each month
+- evaluate `top 20`, `top 50`, and `top decile`
+- `top decile = max(1, floor(eligible_candidate_count * 0.10))`
+
+Stop Checking Price:
+
+- quarterly rebalance
+- use the last available snapshot in each quarter
+- evaluate `top 20` and `top 50`
+
+### Return Rules
+
+- formation uses the official ranking from the formation snapshot only
+- holdings are equal weight
+- return is close-to-close from the formation snapshot to the next rebalance snapshot
+- no future snapshot may be used to re-score the formation portfolio
+
+### Missing Next-Period Price Policy
+
+If a holding does not have next-period price:
+
+- mark that ticker as `missing_next_period_price`
+- set that ticker's return to `null`
+- set the entire portfolio period return to `null`
+- exclude that period from CAGR, Sharpe, Sortino, volatility, drawdown, and hit-rate metrics
+
+### Benchmarks
+
+SPY:
+
+- use local price only
+- source can be snapshot benchmark metadata or a separate local `spy_prices.json`
+- missing SPY price leaves that benchmark period as `null`
+
+Equal-weight universe:
+
+- use all hard-pass names from the formation snapshot
+- include only tickers that also have next-period price
+- disclose per-period eligible count
+
+### Fixed Metrics
+
+- `risk_free_rate = 0`
+- Hybrid annualization factor = `12`
+- Stop annualization factor = `4`
+- `turnover = 0.5 * sum(abs(current_weight - previous_weight))`
+- `top_holdings_concentration = min(10, holding_count) / holding_count`
+
+### Required Report Flags
+
+- `research_only = true`
+- `not_point_in_time_accurate = true`
+- `survivorship_bias_possible = true`
+- `not_for_automated_trading = true`
+- `missing_return_policy = invalidate_portfolio_period`
+
 - `sector_relative_score_preview`
 - `sector_relative_rank_preview`
 - `sector_relative_score_delta`
