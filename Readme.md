@@ -219,23 +219,6 @@ min_score：未設定
 
 但分數不是買賣指令，只是排序輔助。
 
-### 人工審查欄位
-
-Phase 5 之後，報告會固定帶人工審查資訊，這些欄位只幫你安排檢查節奏，不會改變分數、排名或策略本身：
-
-- `review_mode`：固定為 `manual_decision_support`
-- `review_priority`：`routine` 或 `prompt`
-- `recommended_review_cadence`：`weekly`、`quarterly`、`prompt_manual_review`
-- `review_reasons`：為什麼這檔需要例行檢查或立即人工複查
-- `review_summary`：本次結果中，例行每週、例行每季、立即人工複查、資料複查的數量
-
-判讀方式：
-
-- Hybrid 一般候選：通常是每週例行檢查
-- Hybrid 高風險 / 資料受限：改成立即人工複查
-- Stop mode 觀察名單：通常是每季例行檢查
-- 任何有 `action_cap_reason`、`risk_safety_score < 40`、或屬於 `data_limited_candidates` 的股票：都應優先人工複查
-
 ### Sector-aware score
 
 這是「產業相對正式分數」。

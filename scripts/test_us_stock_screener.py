@@ -1135,7 +1135,7 @@ class ScreenerTests(unittest.TestCase):
         self.assertEqual(target.sector_relative_peer_source, "sector")
         self.assertEqual(target.sector_relative_peer_count, len(records))
 
-    def test_cli_gui_web_show_same_strategy_status_and_peer_provenance(self) -> None:
+    def test_cli_gui_web_review_metadata_are_consistent(self) -> None:
         sample = SCRIPT_DIR.parent / "references" / "sample-universe.csv"
         report = build_report(load_records(sample), self.config, strategy_mode="hybrid", top_n=4)
         markdown = screener._render_markdown(report)
@@ -1156,9 +1156,19 @@ class ScreenerTests(unittest.TestCase):
         self.assertEqual(web_payload["market_regime"], "neutral")
         self.assertEqual(web_payload["market_regime_status"], "insufficient_market_data")
         self.assertIn("檢查模式：manual_decision_support", markdown)
+        self.assertIn("no_automatic_trading：true", markdown)
         self.assertIn("review_summary：", markdown)
+        self.assertIn("hybrid_weekly_candidate_review", markdown)
         self.assertIn("review_mode：manual_decision_support", gui_text)
+        self.assertIn("no_automatic_trading：True", gui_text)
         self.assertIn("review_summary：", gui_text)
+        self.assertIn("Review reasons：hybrid_weekly_candidate_review", gui_text)
+        self.assertEqual(web_payload["review_mode"], "manual_decision_support")
+        self.assertTrue(web_payload["no_automatic_trading"])
+        self.assertIn("review_summary", web_payload)
+        self.assertEqual(web_payload["candidates"][0]["review_priority"], "routine")
+        self.assertEqual(web_payload["candidates"][0]["recommended_review_cadence"], "weekly")
+        self.assertIn("hybrid_weekly_candidate_review", web_payload["candidates"][0]["review_reasons"])
         self.assertIn("Official source", markdown)
         self.assertIn("Official source", gui_text)
         self.assertIn("official_score_source", web_payload["candidates"][0])
@@ -1715,6 +1725,34 @@ class ScreenerTests(unittest.TestCase):
         self.assertEqual(candidate.review_priority, "prompt")
         self.assertEqual(candidate.recommended_review_cadence, "prompt_manual_review")
         self.assertIn("data_limited_candidate", candidate.review_reasons)
+
+    def test_low_risk_safety_score_overrides_to_prompt_manual_review(self) -> None:
+        momentum_driven = self._sector_preview_record(
+            "MOMO1",
+            relative_strength_252d=100,
+            price_vs_sma50_pct=25,
+            price_vs_sma200_pct=45,
+        )
+        high_risk = dict(
+            momentum_driven,
+            ticker="RISKY",
+            revenue_growth_yoy=25,
+            eps_growth_yoy=30,
+            gross_margin=55,
+            operating_margin=35,
+            return_on_equity=25,
+            pe_ratio=50,
+            beta=2.0,
+            volatility_63d=55,
+            max_drawdown_252d=45,
+        )
+        report = build_report([momentum_driven, high_risk], self.config, strategy_mode="hybrid", top_n=2)
+        candidate = next(item for item in report.candidates if item.ticker == "RISKY")
+        self.assertLess(candidate.risk_safety_score, 40)
+        self.assertTrue(candidate.review_required)
+        self.assertEqual(candidate.review_priority, "prompt")
+        self.assertEqual(candidate.recommended_review_cadence, "prompt_manual_review")
+        self.assertIn("low_risk_safety_score", candidate.review_reasons)
 
     def test_stop_watchlist_and_high_quality_get_quarterly_routine_review(self) -> None:
         strong = {
