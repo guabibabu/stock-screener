@@ -767,6 +767,7 @@ class ScreenResult:
     sector_relative_peer_source: Optional[str] = None
     sector_relative_peer_count: Optional[int] = None
     sector_relative_peer_reason: Optional[str] = None
+    official_score_source: Optional[str] = None
     legacy_total_score: Optional[float] = None
     legacy_raw_score: Optional[float] = None
     legacy_adjusted_score: Optional[float] = None
@@ -2550,7 +2551,14 @@ def _disable_official_sector_aware(candidates: Sequence[ScreenResult]) -> None:
         item.sector_relative_peer_source = "not_scored_sector_aware_disabled"
         item.sector_relative_peer_count = 0
         item.sector_relative_peer_reason = "official sector-aware scoring disabled because sector metadata coverage is below 90%."
+        item.official_score_source = "legacy_metadata_gate"
         item.factor_scores["sector_aware_official_score"] = False
+
+
+def _record_has_sector_metadata(record: Optional[StockRecord]) -> bool:
+    if record is None:
+        return False
+    return _clean_metadata_text(record.sector) is not None and _clean_metadata_text(record.industry) is not None
 
 
 def promote_sector_relative_scores(
@@ -2567,6 +2575,10 @@ def promote_sector_relative_scores(
             continue
         if item.legacy_total_score is None:
             _store_legacy_scores(item)
+        if not _record_has_sector_metadata(item.record):
+            item.official_score_source = "legacy_missing_metadata"
+            item.factor_scores["sector_aware_official_score"] = False
+            continue
         factor_scores = item.sector_relative_factor_scores
         sector_raw_score = item.sector_relative_score_preview
         if strategy_mode == "hybrid":
@@ -2598,6 +2610,7 @@ def promote_sector_relative_scores(
                 "risk_safety": item.risk_safety_score,
             }
         )
+        item.official_score_source = "sector_aware"
         if strategy_mode == "stop_checking_price":
             penalty_score = item.penalty_score or 0.0
             confidence_multiplier = item.confidence_multiplier or 1.0
@@ -2795,6 +2808,7 @@ def score_record(
             data_quality_flags=data_quality_flags_list,
             normalization_notes=normalization_notes_list,
             action_cap_reason=action_cap_reason,
+            official_score_source=None,
         )
 
     fundamental, fundamental_parts = _fundamental_score(record)
@@ -2841,6 +2855,7 @@ def score_record(
             exclusion_reasons=[excluded_reason],
             exclusion_details=exclusion_details,
             record=record,
+            official_score_source=None,
         )
 
     total = _average(
@@ -2881,6 +2896,7 @@ def score_record(
         confidence_multiplier=1.0,
         final_score=total_score,
         action_cap_reason=action_cap_reason,
+        official_score_source=None,
     )
 
 
@@ -3146,16 +3162,17 @@ def _render_markdown(report: ScreeningReport) -> str:
     lines.append("")
     lines.append("## 候選名單")
     lines.append("")
-    lines.append("| 排名 | Ticker | 總分 | Legacy score | Sector-aware preview | Peer source | Peer count | Peer reason | 資料品質 | 動作 | 基本面 | 動量 | 風險安全 | 主要理由 | 風險警示 |")
-    lines.append("| --- | --- | ---: | ---: | --- | --- | ---: | --- | ---: | --- | ---: | ---: | ---: | --- | --- |")
+    lines.append("| 排名 | Ticker | 總分 | Official source | Legacy score | Sector-aware preview | Peer source | Peer count | Peer reason | 資料品質 | 動作 | 基本面 | 動量 | 風險安全 | 主要理由 | 風險警示 |")
+    lines.append("| --- | --- | ---: | --- | ---: | --- | --- | ---: | --- | ---: | --- | ---: | ---: | ---: | --- | --- |")
     for index, item in enumerate(report.candidates, start=1):
         warnings = "；".join(item.risk_warnings) if item.risk_warnings else "無"
         reasons = "；".join(item.reasons)
         lines.append(
-            "| {rank} | {ticker} | {total} | {legacy_total} | {sector_preview} | {peer_source} | {peer_count} | {peer_reason} | {data_quality} | {action} | {fundamental} | {momentum} | {risk} | {reasons} | {warnings} |".format(
+            "| {rank} | {ticker} | {total} | {official_source} | {legacy_total} | {sector_preview} | {peer_source} | {peer_count} | {peer_reason} | {data_quality} | {action} | {fundamental} | {momentum} | {risk} | {reasons} | {warnings} |".format(
                 rank=index,
                 ticker=item.ticker,
                 total=item.total_score if item.total_score is not None else "",
+                official_source=item.official_score_source or "",
                 legacy_total=item.legacy_total_score if item.legacy_total_score is not None else "",
                 sector_preview=_format_sector_relative_preview(item),
                 peer_source=_format_sector_relative_peer_source(item),
@@ -3312,6 +3329,7 @@ def _render_json(report: ScreeningReport) -> str:
                 "sector_relative_peer_source": item.sector_relative_peer_source,
                 "sector_relative_peer_count": item.sector_relative_peer_count,
                 "sector_relative_peer_reason": item.sector_relative_peer_reason,
+                "official_score_source": item.official_score_source,
             }
             for item in report.candidates
         ],

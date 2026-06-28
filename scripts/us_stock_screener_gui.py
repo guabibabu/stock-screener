@@ -1238,6 +1238,7 @@ class ScreenerApp(tk.Tk):
         lines = [
             f"{item.ticker}",
             f"總分：{item.total_score}",
+            f"Official source：{item.official_score_source or 'N/A'}",
             f"Legacy score：{item.legacy_total_score if item.legacy_total_score is not None else 'N/A'}",
             f"原始分：{item.raw_score}",
             f"扣分：{item.penalty_score}",
@@ -1396,6 +1397,7 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
     for index, item in enumerate(report.candidates, start=1):
         lines.append(f"{index}. {item.ticker}")
         lines.append(f"   總分：{item.total_score}")
+        lines.append(f"   Official source：{item.official_score_source or 'N/A'}")
         lines.append(f"   Legacy score：{item.legacy_total_score if item.legacy_total_score is not None else 'N/A'}")
         lines.append(f"   Sector-aware preview：{_format_sector_relative_preview(item) or 'N/A'}")
         lines.append(f"   Peer source：{_format_sector_relative_peer_source(item) or 'N/A'}")

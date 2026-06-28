@@ -185,6 +185,7 @@ def _result_to_payload(item: Any) -> Dict[str, Any]:
         "sector_relative_peer_source": item.sector_relative_peer_source,
         "sector_relative_peer_count": item.sector_relative_peer_count,
         "sector_relative_peer_reason": item.sector_relative_peer_reason,
+        "official_score_source": item.official_score_source,
     }
 
 
@@ -710,6 +711,7 @@ INDEX_HTML = r"""<!doctype html>
       (report.candidates || []).forEach((item, index) => {
         lines.push(`${index + 1}. ${item.ticker}`);
         lines.push(`   總分：${item.total_score}`);
+        lines.push(`   Official source：${item.official_score_source ?? 'N/A'}`);
         lines.push(`   Legacy score：${item.legacy_total_score ?? 'N/A'}`);
         lines.push(`   Sector-aware preview：${formatSectorPreview(item) || 'N/A'}`);
         lines.push(`   Peer source：${formatPeerSource(item) || 'N/A'}`);
@@ -789,6 +791,7 @@ INDEX_HTML = r"""<!doctype html>
       $('detail').textContent = [
         `${item.ticker}`,
         `總分：${item.total_score}`,
+        `Official source：${item.official_score_source ?? 'N/A'}`,
         `Legacy score：${item.legacy_total_score ?? 'N/A'}`,
         `原始分：${item.raw_score}`,
         `扣分：${item.penalty_score}`,

@@ -68,6 +68,7 @@ class ScreenerTests(unittest.TestCase):
         record = {
             "ticker": ticker,
             "sector": "Technology",
+            "industry": "Software",
             "price": 100,
             "market_cap": 50_000_000_000,
             "avg_dollar_volume_20d": 100_000_000,
@@ -162,6 +163,7 @@ class ScreenerTests(unittest.TestCase):
         self.assertEqual(report.sector_aware_status, "disabled_insufficient_sector_metadata")
         self.assertTrue(all(item.total_score == item.legacy_total_score for item in report.candidates))
         self.assertTrue(all(item.sector_relative_peer_source == "not_scored_sector_aware_disabled" for item in report.candidates))
+        self.assertTrue(all(item.official_score_source == "legacy_metadata_gate" for item in report.candidates))
 
     def test_sector_coverage_above_gate_uses_sector_aware_official_score(self) -> None:
         records = [
@@ -172,6 +174,99 @@ class ScreenerTests(unittest.TestCase):
         self.assertTrue(report.sector_aware_official_scoring)
         self.assertEqual(report.sector_aware_status, "enabled")
         self.assertTrue(any(item.total_score != item.legacy_total_score for item in report.candidates))
+        self.assertTrue(all(item.official_score_source == "sector_aware" for item in report.candidates))
+
+    def test_sector_coverage_above_gate_missing_metadata_uses_legacy_official_without_preview_rank_pollution(self) -> None:
+        records = [
+            self._sector_preview_record(
+                "FULLHIGH",
+                sector="Technology",
+                industry="Software",
+                revenue_growth_yoy=28,
+                eps_growth_yoy=28,
+                gross_margin=58,
+                operating_margin=28,
+                return_on_equity=24,
+                pe_ratio=22,
+                ps_ratio=5,
+                relative_strength_252d=82,
+                price_vs_sma200_pct=8,
+                beta=0.9,
+                volatility_63d=18,
+                max_drawdown_252d=10,
+            ),
+            self._sector_preview_record(
+                "FULLMID",
+                sector="Technology",
+                industry="Software",
+                revenue_growth_yoy=9,
+                eps_growth_yoy=9,
+                gross_margin=39,
+                operating_margin=14,
+                return_on_equity=12,
+                pe_ratio=27,
+                ps_ratio=6.5,
+                relative_strength_252d=56,
+                price_vs_sma200_pct=2,
+                beta=1.05,
+                volatility_63d=23,
+                max_drawdown_252d=18,
+            ),
+            self._sector_preview_record(
+                "NOMETA",
+                sector=None,
+                industry=None,
+                revenue_growth_yoy=12,
+                eps_growth_yoy=12,
+                gross_margin=44,
+                operating_margin=18,
+                return_on_equity=14,
+                pe_ratio=26,
+                ps_ratio=6,
+                relative_strength_252d=72,
+                price_vs_sma200_pct=5,
+                beta=1.0,
+                volatility_63d=24,
+                max_drawdown_252d=16,
+            ),
+        ]
+        records.extend(
+            self._sector_preview_record(
+                f"WEAK{index:02d}",
+                sector="Technology",
+                industry="Hardware",
+                revenue_growth_yoy=-5 + index,
+                eps_growth_yoy=-4 + index,
+                gross_margin=20 + index,
+                operating_margin=5 + index,
+                return_on_equity=4 + index,
+                pe_ratio=40 + index,
+                ps_ratio=9 + index * 0.2,
+                relative_strength_252d=20 + index,
+                price_vs_sma200_pct=-8 + index * 0.5,
+                beta=1.4,
+                volatility_63d=38 + index,
+                max_drawdown_252d=28 + index,
+            )
+            for index in range(9)
+        )
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=11)
+        candidates = {item.ticker: item for item in report.candidates}
+        nometa = candidates["NOMETA"]
+        fullhigh = candidates["FULLHIGH"]
+        fullmid = candidates["FULLMID"]
+        self.assertEqual(report.sector_aware_status, "enabled")
+        self.assertEqual(nometa.official_score_source, "legacy_missing_metadata")
+        self.assertEqual(nometa.total_score, nometa.legacy_total_score)
+        self.assertEqual(nometa.sector_relative_peer_source, "universe_missing_metadata")
+        self.assertIsNotNone(nometa.sector_relative_score_preview)
+        self.assertGreater(nometa.sector_relative_score_preview or 0, nometa.legacy_total_score or 0)
+        self.assertEqual(nometa.suggested_action, screener.assign_hybrid_action(nometa.record, nometa.legacy_total_score, nometa.legacy_risk_safety_score)[0])
+        ranked_tickers = [item.ticker for item in report.candidates]
+        self.assertLess(ranked_tickers.index("FULLHIGH"), ranked_tickers.index("NOMETA"))
+        self.assertLess(ranked_tickers.index("FULLMID"), ranked_tickers.index("NOMETA"))
+        self.assertGreater(nometa.sector_relative_score_preview or 0, fullmid.total_score or 0)
+        self.assertEqual(fullhigh.official_score_source, "sector_aware")
 
     def test_shadow_preview_missing_metadata_uses_universe_missing_metadata_source(self) -> None:
         candidates = [
@@ -327,7 +422,12 @@ class ScreenerTests(unittest.TestCase):
 
     def test_sector_preview_reports_sector_peer_source(self) -> None:
         records = [
-            self._sector_preview_record(f"TECH{index:02d}", revenue_growth_yoy=index, eps_growth_yoy=index)
+            self._sector_preview_record(
+                f"TECH{index:02d}",
+                industry="IndustryA" if index < 15 else "IndustryB",
+                revenue_growth_yoy=index,
+                eps_growth_yoy=index,
+            )
             for index in range(screener.SECTOR_RELATIVE_MIN_PEERS)
         ]
         report = build_report(records, self.config, strategy_mode="hybrid", top_n=40)
@@ -361,7 +461,11 @@ class ScreenerTests(unittest.TestCase):
 
     def test_sector_summary_counts_peer_sources(self) -> None:
         records = [
-            self._sector_preview_record(f"TECH{index:02d}", sector="Technology")
+            self._sector_preview_record(
+                f"TECH{index:02d}",
+                sector="Technology",
+                industry="IndustryA" if index < 15 else "IndustryB",
+            )
             for index in range(screener.SECTOR_RELATIVE_MIN_PEERS)
         ]
         records.extend(
@@ -544,6 +648,7 @@ class ScreenerTests(unittest.TestCase):
         self.assertIn("sector_relative_peer_source", report["candidates"][0])
         self.assertIn("sector_relative_peer_count", report["candidates"][0])
         self.assertIn("sector_relative_peer_reason", report["candidates"][0])
+        self.assertIn("official_score_source", report["candidates"][0])
 
     def test_sector_relative_preview_coverage_and_correlation(self) -> None:
         records = [
@@ -779,6 +884,9 @@ class ScreenerTests(unittest.TestCase):
         self.assertIn("sector_aware_status：disabled_insufficient_sector_metadata", markdown)
         self.assertIn("sector_aware_status：disabled_insufficient_sector_metadata", gui_text)
         self.assertEqual(web_payload["sector_aware_status"], "disabled_insufficient_sector_metadata")
+        self.assertIn("Official source", markdown)
+        self.assertIn("Official source", gui_text)
+        self.assertIn("official_score_source", web_payload["candidates"][0])
         self.assertIn("Peer reason", markdown)
         self.assertIn("Peer reason", gui_text)
         self.assertIn("sector_relative_peer_reason", web_payload["candidates"][0])
