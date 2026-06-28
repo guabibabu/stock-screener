@@ -9,6 +9,7 @@ from datetime import date, timedelta
 from pathlib import Path
 import sys
 import json
+import csv
 from unittest import mock
 
 
@@ -2429,6 +2430,71 @@ class ScreenerTests(unittest.TestCase):
             self.assertIn("missing_return_policy", summary_csv)
             self.assertIn("research_only: `true`", markdown)
             self.assertIn("missing_return_policy: `invalidate_portfolio_period`", markdown)
+
+    def test_backtest_sortino_na_when_no_negative_periods(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            history = root / "history"
+            history.mkdir()
+            self._write_backtest_snapshot(history, "2026-01-31", [self._backtest_record("AAA", 100)], benchmarks={"SPY": 500})
+            self._write_backtest_snapshot(history, "2026-02-28", [self._backtest_record("AAA", 110)], benchmarks={"SPY": 510})
+            out = root / "out" / "hybrid.out"
+            out.parent.mkdir(parents=True)
+            exit_code = backtest.main(
+                [
+                    "--snapshots-dir",
+                    str(history),
+                    "--strategy-mode",
+                    "hybrid",
+                    "--output-prefix",
+                    str(out),
+                ]
+            )
+            self.assertEqual(exit_code, 0)
+            with (out.with_suffix(".summary.csv")).open() as handle:
+                summary_rows = list(csv.DictReader(handle))
+            top20 = next(row for row in summary_rows if row["portfolio_name"] == "top_20")
+            self.assertEqual(top20["sortino_ratio"], "N/A")
+            self.assertEqual(top20["sortino_reason"], "no_negative_return_periods")
+            markdown = out.with_suffix(".md").read_text()
+            self.assertIn("- Sortino: N/A", markdown)
+            self.assertIn("- Sortino reason: no negative return periods", markdown)
+
+    def test_backtest_sortino_numeric_when_negative_periods_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            history = root / "history"
+            history.mkdir()
+            self._write_backtest_snapshot(history, "2026-01-31", [self._backtest_record("AAA", 100)], benchmarks={"SPY": 500})
+            self._write_backtest_snapshot(history, "2026-02-28", [self._backtest_record("AAA", 90)], benchmarks={"SPY": 490})
+            self._write_backtest_snapshot(history, "2026-03-31", [self._backtest_record("AAA", 99)], benchmarks={"SPY": 500})
+            out = root / "out" / "hybrid.out"
+            out.parent.mkdir(parents=True)
+            exit_code = backtest.main(
+                [
+                    "--snapshots-dir",
+                    str(history),
+                    "--strategy-mode",
+                    "hybrid",
+                    "--output-prefix",
+                    str(out),
+                ]
+            )
+            self.assertEqual(exit_code, 0)
+            with (out.with_suffix(".summary.csv")).open() as handle:
+                summary_rows = list(csv.DictReader(handle))
+            top20 = next(row for row in summary_rows if row["portfolio_name"] == "top_20")
+            self.assertNotEqual(top20["sortino_ratio"], "N/A")
+            self.assertNotEqual(top20["sortino_ratio"], "")
+            self.assertEqual(top20["sortino_reason"], "")
+
+    def test_backtest_sortino_format_change_does_not_change_other_metrics(self) -> None:
+        period_returns = [0.10]
+        self.assertEqual(backtest._cagr(period_returns, 12), 2.138428376721003)
+        self.assertIsNone(backtest._annualized_volatility(period_returns, 12))
+        self.assertIsNone(backtest._sharpe(period_returns, 12))
+        self.assertEqual(backtest._max_drawdown(period_returns), 0.0)
+        self.assertEqual(backtest._turnover({"AAA": 0.5, "BBB": 0.5}, {"AAA": 1.0}), 0.5)
 
     def test_web_parse_uploaded_ticker_csv(self) -> None:
         kind, rows = parse_uploaded_content("watchlist.csv", "ticker\nAAPL\nMSFT\n")

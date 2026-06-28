@@ -76,6 +76,7 @@ class BacktestSummary:
     annualized_volatility: Optional[float]
     sharpe_ratio: Optional[float]
     sortino_ratio: Optional[float]
+    sortino_reason: str
     max_drawdown: Optional[float]
     average_turnover: Optional[float]
     hit_rate: Optional[float]
@@ -392,6 +393,13 @@ def _sortino(period_returns: Sequence[float], annualization_factor: int) -> Opti
     return mean(period_returns) / downside_deviation * math.sqrt(annualization_factor)
 
 
+def _sortino_reason(period_returns: Sequence[float]) -> str:
+    downside = [value for value in period_returns if value < 0]
+    if not period_returns or not downside:
+        return "no_negative_return_periods"
+    return ""
+
+
 def _max_drawdown(period_returns: Sequence[float]) -> Optional[float]:
     if not period_returns:
         return None
@@ -473,6 +481,7 @@ def _summarize_periods(
         annualized_volatility=_annualized_volatility(valid_returns, annualization_factor),
         sharpe_ratio=_sharpe(valid_returns, annualization_factor),
         sortino_ratio=_sortino(valid_returns, annualization_factor),
+        sortino_reason=_sortino_reason(valid_returns),
         max_drawdown=_max_drawdown(valid_returns),
         average_turnover=mean(turnover_values) if turnover_values else None,
         hit_rate=(positive_holding_returns / total_holding_returns) if total_holding_returns else None,
@@ -574,7 +583,8 @@ def _summary_rows(summaries: Sequence[BacktestSummary]) -> List[Dict[str, Any]]:
             "cagr": _safe_round(summary.cagr),
             "annualized_volatility": _safe_round(summary.annualized_volatility),
             "sharpe_ratio": _safe_round(summary.sharpe_ratio),
-            "sortino_ratio": _safe_round(summary.sortino_ratio),
+            "sortino_ratio": (_safe_round(summary.sortino_ratio) if summary.sortino_ratio is not None else "N/A"),
+            "sortino_reason": summary.sortino_reason,
             "max_drawdown": _safe_round(summary.max_drawdown),
             "average_turnover": _safe_round(summary.average_turnover),
             "hit_rate": _safe_round(summary.hit_rate),
@@ -662,7 +672,8 @@ def render_markdown_report(
         lines.append(f"- CAGR: {_safe_round(summary.cagr)}")
         lines.append(f"- annualized_volatility: {_safe_round(summary.annualized_volatility)}")
         lines.append(f"- Sharpe: {_safe_round(summary.sharpe_ratio)}")
-        lines.append(f"- Sortino: {_safe_round(summary.sortino_ratio)}")
+        lines.append(f"- Sortino: {_safe_round(summary.sortino_ratio) if summary.sortino_ratio is not None else 'N/A'}")
+        lines.append(f"- Sortino reason: {summary.sortino_reason.replace('_', ' ') if summary.sortino_reason else ''}")
         lines.append(f"- max_drawdown: {_safe_round(summary.max_drawdown)}")
         lines.append(f"- average_turnover: {_safe_round(summary.average_turnover)}")
         lines.append(f"- hit_rate: {_safe_round(summary.hit_rate)}")
