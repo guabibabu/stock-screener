@@ -17,9 +17,12 @@ import us_stock_screener as screener
 from us_stock_screener import ScreenConfig, build_report, load_records, screen_records
 from fetch_yfinance_snapshot import (
     SnapshotBundle,
+    build_market_context,
     fetch_snapshot,
+    load_market_context,
     load_snapshot,
     load_watchlist,
+    save_market_context,
     save_snapshot,
 )
 from us_stock_screener_web import parse_uploaded_content, run_screen_request
@@ -89,6 +92,57 @@ class ScreenerTests(unittest.TestCase):
         }
         record.update(overrides)
         return record
+
+    def _market_context(self, regime: str) -> dict:
+        if regime == "risk_on":
+            return {
+                "as_of_date": "2026-06-27",
+                "spy_close": 610.0,
+                "spy_sma200": 580.0,
+                "qqq_close": 530.0,
+                "qqq_sma200": 500.0,
+                "vix_close": 18.0,
+                "breadth_above_200dma": 0.72,
+                "breadth_eligible_count": 450,
+                "market_context_source": "test",
+            }
+        if regime == "risk_off":
+            return {
+                "as_of_date": "2026-06-27",
+                "spy_close": 540.0,
+                "spy_sma200": 580.0,
+                "qqq_close": 460.0,
+                "qqq_sma200": 500.0,
+                "vix_close": 28.0,
+                "breadth_above_200dma": 0.31,
+                "breadth_eligible_count": 450,
+                "market_context_source": "test",
+            }
+        if regime == "neutral":
+            return {
+                "as_of_date": "2026-06-27",
+                "spy_close": 590.0,
+                "spy_sma200": 580.0,
+                "qqq_close": 490.0,
+                "qqq_sma200": 500.0,
+                "vix_close": 22.0,
+                "breadth_above_200dma": 0.52,
+                "breadth_eligible_count": 450,
+                "market_context_source": "test",
+            }
+        if regime == "insufficient":
+            return {
+                "as_of_date": None,
+                "spy_close": 590.0,
+                "spy_sma200": None,
+                "qqq_close": None,
+                "qqq_sma200": None,
+                "vix_close": 22.0,
+                "breadth_above_200dma": None,
+                "breadth_eligible_count": 0,
+                "market_context_source": "test",
+            }
+        raise ValueError(regime)
 
     def test_yfinance_snapshot_writes_sector_and_industry_metadata(self) -> None:
         provider = FakeProvider(
@@ -643,12 +697,19 @@ class ScreenerTests(unittest.TestCase):
         self.assertIn("sector_aware_universe_fallback_count", report)
         self.assertIn("sector_aware_universe_missing_metadata_count", report)
         self.assertIn("sector_aware_not_scored_disabled_count", report)
+        self.assertIn("market_regime", report)
+        self.assertIn("market_regime_status", report)
+        self.assertIn("configured_composite_weights", report)
+        self.assertIn("effective_composite_weights", report)
+        self.assertIn("market_context", report)
         self.assertIn("sector_relative_score_preview", report["candidates"][0])
         self.assertIn("sector_relative_factor_scores", report["candidates"][0])
         self.assertIn("sector_relative_peer_source", report["candidates"][0])
         self.assertIn("sector_relative_peer_count", report["candidates"][0])
         self.assertIn("sector_relative_peer_reason", report["candidates"][0])
         self.assertIn("official_score_source", report["candidates"][0])
+        self.assertIn("base_total_score", report["candidates"][0])
+        self.assertIn("market_regime_score_delta", report["candidates"][0])
 
     def test_sector_relative_preview_coverage_and_correlation(self) -> None:
         records = [
@@ -882,11 +943,17 @@ class ScreenerTests(unittest.TestCase):
             }
         )
         self.assertIn("sector_aware_status：disabled_insufficient_sector_metadata", markdown)
+        self.assertIn("market_regime：neutral", markdown)
         self.assertIn("sector_aware_status：disabled_insufficient_sector_metadata", gui_text)
+        self.assertIn("market_regime：neutral", gui_text)
         self.assertEqual(web_payload["sector_aware_status"], "disabled_insufficient_sector_metadata")
+        self.assertEqual(web_payload["market_regime"], "neutral")
+        self.assertEqual(web_payload["market_regime_status"], "insufficient_market_data")
         self.assertIn("Official source", markdown)
         self.assertIn("Official source", gui_text)
         self.assertIn("official_score_source", web_payload["candidates"][0])
+        self.assertIn("base_total_score", web_payload["candidates"][0])
+        self.assertIn("market_regime_score_delta", web_payload["candidates"][0])
         self.assertIn("Peer reason", markdown)
         self.assertIn("Peer reason", gui_text)
         self.assertIn("sector_relative_peer_reason", web_payload["candidates"][0])
@@ -1982,6 +2049,181 @@ class ScreenerTests(unittest.TestCase):
         self.assertEqual(loaded.source_name, "yfinance")
         self.assertEqual(loaded.records[0]["ticker"], "AAPL")
         self.assertEqual(loaded.warnings, ["AAPL: test warning"])
+
+    def test_market_context_sidecar_roundtrip(self) -> None:
+        provider = FakeProvider(
+            {
+                "SPY": {
+                    "info": {"regularMarketPrice": 610, "marketCap": 1, "quoteType": "ETF"},
+                    "history": [
+                        {"Date": "2026-06-25", "Close": 600, "Volume": 1},
+                        {"Date": "2026-06-26", "Close": 605, "Volume": 1},
+                        {"Date": "2026-06-27", "Close": 610, "Volume": 1},
+                    ]
+                    + [{"Date": f"2025-12-{day:02d}", "Close": 500 + day, "Volume": 1} for day in range(1, 29)],
+                    "errors": [],
+                },
+                "QQQ": {
+                    "info": {"regularMarketPrice": 530, "marketCap": 1, "quoteType": "ETF"},
+                    "history": [
+                        {"Date": "2026-06-25", "Close": 520, "Volume": 1},
+                        {"Date": "2026-06-26", "Close": 525, "Volume": 1},
+                        {"Date": "2026-06-27", "Close": 530, "Volume": 1},
+                    ]
+                    + [{"Date": f"2025-11-{day:02d}", "Close": 430 + day, "Volume": 1} for day in range(1, 29)],
+                    "errors": [],
+                },
+                "^VIX": {
+                    "info": {"regularMarketPrice": 18, "marketCap": 1, "quoteType": "INDEX"},
+                    "history": [
+                        {"Date": "2026-06-25", "Close": 19, "Volume": 1},
+                        {"Date": "2026-06-26", "Close": 18.5, "Volume": 1},
+                        {"Date": "2026-06-27", "Close": 18, "Volume": 1},
+                    ]
+                    + [{"Date": f"2025-10-{day:02d}", "Close": 21 + day * 0.1, "Volume": 1} for day in range(1, 29)],
+                    "errors": [],
+                },
+            }
+        )
+        records = [
+            {"ticker": "AAA", "price_vs_sma200_pct": 5},
+            {"ticker": "BBB", "price_vs_sma200_pct": -2},
+            {"ticker": "CCC", "price_vs_sma200_pct": 1},
+        ]
+        context = build_market_context(records, provider=provider)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "context.json"
+            saved = save_market_context(context, path)
+            loaded = load_market_context(saved)
+        self.assertEqual(loaded["as_of_date"], "2026-06-27")
+        self.assertEqual(loaded["breadth_eligible_count"], 3)
+        self.assertAlmostEqual(loaded["breadth_above_200dma"], 0.667, places=3)
+
+    def test_market_regime_risk_on_hybrid_effective_weights(self) -> None:
+        records = [
+            self._sector_preview_record("AAA", revenue_growth_yoy=5, eps_growth_yoy=5, relative_strength_252d=80),
+            self._sector_preview_record("BBB", revenue_growth_yoy=15, eps_growth_yoy=15, relative_strength_252d=40),
+        ]
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=2, market_context=self._market_context("risk_on"))
+        self.assertEqual(report.market_regime, "risk_on")
+        self.assertEqual(report.market_regime_status, "enabled")
+        self.assertEqual(report.effective_composite_weights, {"fundamental": 0.4, "momentum": 0.4, "risk_safety": 0.2})
+
+    def test_market_regime_risk_off_hybrid_effective_weights(self) -> None:
+        records = [
+            self._sector_preview_record("AAA"),
+            self._sector_preview_record("BBB", revenue_growth_yoy=20, eps_growth_yoy=20),
+        ]
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=2, market_context=self._market_context("risk_off"))
+        self.assertEqual(report.market_regime, "risk_off")
+        self.assertEqual(report.effective_composite_weights, {"fundamental": 0.35, "momentum": 0.3, "risk_safety": 0.35})
+
+    def test_market_regime_neutral_keeps_scores_unchanged(self) -> None:
+        records = [self._sector_preview_record("AAA"), self._sector_preview_record("BBB", revenue_growth_yoy=20, eps_growth_yoy=20)]
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=2, market_context=self._market_context("neutral"))
+        self.assertEqual(report.market_regime, "neutral")
+        self.assertEqual(report.market_regime_status, "enabled")
+        self.assertTrue(all(item.total_score == item.base_total_score for item in report.candidates))
+        self.assertTrue(all(item.market_regime_score_delta == 0 for item in report.candidates))
+
+    def test_market_regime_insufficient_keeps_scores_unchanged(self) -> None:
+        records = [self._sector_preview_record("AAA"), self._sector_preview_record("BBB", revenue_growth_yoy=20, eps_growth_yoy=20)]
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=2, market_context=self._market_context("insufficient"))
+        self.assertEqual(report.market_regime, "neutral")
+        self.assertEqual(report.market_regime_status, "insufficient_market_data")
+        self.assertTrue(all(item.total_score == item.base_total_score for item in report.candidates))
+        self.assertTrue(all(item.market_regime_score_delta == 0 for item in report.candidates))
+
+    def test_market_regime_stop_risk_on_keeps_weights(self) -> None:
+        records = [
+            self._sector_preview_record("STOPA", free_cash_flow=2_000_000_000, shares_growth_yoy=0.01, roe=0.20, roic=0.14),
+            self._sector_preview_record("STOPB", free_cash_flow=1_000_000_000, shares_growth_yoy=0.02, roe=0.12, roic=0.08),
+        ]
+        report = build_report(records, self.config, strategy_mode="stop_checking_price", min_score=0, top_n=2, market_context=self._market_context("risk_on"))
+        self.assertEqual(report.effective_composite_weights, {"fundamental": 0.55, "risk_safety": 0.3, "momentum": 0.15})
+
+    def test_market_regime_stop_risk_off_uses_penalty_confidence_pipeline(self) -> None:
+        records = [
+            self._sector_preview_record(
+                "STOPA",
+                free_cash_flow=-100,
+                shares_growth_yoy=0.08,
+                roe=0.20,
+                roic=0.14,
+                debt_to_equity=3.0,
+                volatility_63d=55,
+                max_drawdown_252d=45,
+            ),
+            self._sector_preview_record("STOPB", free_cash_flow=1_000_000_000, shares_growth_yoy=0.02, roe=0.12, roic=0.08),
+        ]
+        report = build_report(records, self.config, strategy_mode="stop_checking_price", min_score=0, top_n=2, market_context=self._market_context("risk_off"))
+        candidate = next(item for item in report.candidates if item.ticker == "STOPA")
+        expected_raw = screener.weighted_average_available(
+            {
+                "fundamental": candidate.fundamental_score,
+                "momentum": candidate.momentum_score,
+                "risk_safety": candidate.risk_safety_score,
+            },
+            report.effective_composite_weights,
+        )
+        expected_adjusted = max(0.0, min(100.0, max(0.0, (expected_raw or 0.0) - (candidate.penalty_score or 0.0)) * (candidate.confidence_multiplier or 1.0)))
+        self.assertEqual(candidate.raw_score, round(expected_raw or 0.0, 1))
+        self.assertEqual(candidate.total_score, round(expected_adjusted, 1))
+        self.assertEqual(candidate.final_score, round(expected_adjusted, 1))
+
+    def test_market_regime_effective_weights_sum_to_one(self) -> None:
+        for strategy_mode in ("hybrid", "stop_checking_price"):
+            for regime in ("risk_on", "neutral", "risk_off"):
+                report = build_report(
+                    [self._sector_preview_record("AAA"), self._sector_preview_record("BBB", revenue_growth_yoy=20, eps_growth_yoy=20)],
+                    self.config,
+                    strategy_mode=strategy_mode,
+                    top_n=2,
+                    min_score=0 if strategy_mode == "stop_checking_price" else None,
+                    market_context=self._market_context(regime),
+                )
+                self.assertAlmostEqual(sum(report.effective_composite_weights.values()), 1.0, places=9)
+
+    def test_market_regime_coverage_gate_legacy_path_can_still_change_final_score(self) -> None:
+        records = [
+            self._sector_preview_record("HASMETA", sector="Technology", industry="Software"),
+            self._sector_preview_record("NOMETA1", sector=None, industry=None, revenue_growth_yoy=30),
+            self._sector_preview_record("NOMETA2", sector=None, industry=None, revenue_growth_yoy=1),
+        ]
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=3, market_context=self._market_context("risk_off"))
+        self.assertEqual(report.sector_aware_status, "disabled_insufficient_sector_metadata")
+        self.assertTrue(all(item.official_score_source == "legacy_metadata_gate" for item in report.candidates))
+        self.assertTrue(any(item.total_score != item.base_total_score for item in report.candidates))
+
+    def test_market_regime_missing_metadata_keeps_preview_out_of_final_score(self) -> None:
+        records = [
+            self._sector_preview_record("FULLHIGH", revenue_growth_yoy=28, eps_growth_yoy=28, relative_strength_252d=82),
+            self._sector_preview_record("FULLMID", revenue_growth_yoy=9, eps_growth_yoy=9, relative_strength_252d=56),
+            self._sector_preview_record("NOMETA", sector=None, industry=None, revenue_growth_yoy=12, eps_growth_yoy=12, relative_strength_252d=72),
+        ]
+        records.extend(self._sector_preview_record(f"WEAK{i:02d}", sector="Technology", industry="Hardware", revenue_growth_yoy=-5 + i, eps_growth_yoy=-4 + i, relative_strength_252d=20 + i) for i in range(9))
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=12, market_context=self._market_context("risk_on"))
+        nometa = next(item for item in report.candidates if item.ticker == "NOMETA")
+        fullmid = next(item for item in report.candidates if item.ticker == "FULLMID")
+        self.assertEqual(nometa.official_score_source, "legacy_missing_metadata")
+        expected_total = screener.weighted_average_available(
+            {
+                "fundamental": nometa.fundamental_score,
+                "momentum": nometa.momentum_score,
+                "risk_safety": nometa.risk_safety_score,
+            },
+            report.effective_composite_weights,
+        )
+        self.assertEqual(nometa.total_score, round(expected_total or 0.0, 1))
+        self.assertEqual(nometa.suggested_action, screener.assign_hybrid_action(nometa.record, nometa.total_score, nometa.risk_safety_score)[0])
+        self.assertEqual(fullmid.official_score_source, "sector_aware")
+
+    def test_market_regime_without_sidecar_is_neutral_and_no_fetch(self) -> None:
+        records = [self._sector_preview_record("AAA"), self._sector_preview_record("BBB", revenue_growth_yoy=20, eps_growth_yoy=20)]
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=2)
+        self.assertEqual(report.market_regime, "neutral")
+        self.assertEqual(report.market_regime_status, "insufficient_market_data")
+        self.assertTrue(all(item.total_score == item.base_total_score for item in report.candidates))
 
     def test_web_parse_uploaded_ticker_csv(self) -> None:
         kind, rows = parse_uploaded_content("watchlist.csv", "ticker\nAAPL\nMSFT\n")

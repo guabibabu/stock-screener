@@ -28,6 +28,31 @@ The refresh helper accepts watchlists that only need:
 
 That watchlist is turned into a full snapshot before scoring.
 
+## Market Context Sidecar
+
+Market regime overlay uses a separate sidecar JSON. It is not embedded into the stock snapshot rows.
+
+Required sidecar fields:
+
+- `as_of_date`
+- `spy_close`
+- `spy_sma200`
+- `qqq_close`
+- `qqq_sma200`
+- `vix_close`
+- `breadth_above_200dma`
+- `breadth_eligible_count`
+- `market_context_source`
+
+Optional helper field:
+
+- `signals`
+
+If the screener is run without an explicit sidecar, it must fall back to:
+
+- `market_regime = neutral`
+- `market_regime_status = insufficient_market_data`
+
 ## Recommended Inputs
 
 | Field | Meaning |
@@ -141,6 +166,8 @@ Sector-aware percentile scoring is now the official scoring layer. The `sector_r
 
 Each candidate can include:
 
+- `base_total_score`
+- `market_regime_score_delta`
 - `sector_relative_score_preview`
 - `sector_relative_rank_preview`
 - `sector_relative_score_delta`
@@ -160,9 +187,15 @@ Each candidate can include:
 
 - `sector`: same-sector peers were used.
 - `industry`: same-industry peers were used.
-- `universe_fallback`: same-sector peer count was below the threshold, so the full candidate universe was used.
-- `missing_sector`: sector metadata was missing, so the full candidate universe was used.
-- `missing_record`: source record was unavailable.
+- `universe_insufficient_peers`: industry and sector metadata were present but peer count was too small, so the full candidate universe was used.
+- `universe_missing_metadata`: preview-only fallback when the stock is missing sector or industry metadata.
+- `not_scored_sector_aware_disabled`: official sector-aware scoring was disabled because overall sector coverage was below the gate.
+
+Official scoring provenance is separate from preview peer provenance:
+
+- `official_score_source = sector_aware`
+- `official_score_source = legacy_metadata_gate`
+- `official_score_source = legacy_missing_metadata`
 
 `sector_relative_peer_count` is the number of records used for the percentile comparison. In universe fallback cases, this is the full candidate universe count.
 

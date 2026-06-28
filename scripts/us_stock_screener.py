@@ -427,6 +427,11 @@ def _format_usd_billions(value: Optional[float]) -> str:
 
 VALID_STRATEGY_MODES = {"hybrid", "stop_checking_price"}
 DEFAULT_STRATEGY_MODE = "hybrid"
+MARKET_REGIME_RISK_ON = "risk_on"
+MARKET_REGIME_NEUTRAL = "neutral"
+MARKET_REGIME_RISK_OFF = "risk_off"
+MARKET_REGIME_STATUS_ENABLED = "enabled"
+MARKET_REGIME_STATUS_INSUFFICIENT = "insufficient_market_data"
 
 STRATEGY_WEIGHTS = {
     "hybrid": {
@@ -768,6 +773,8 @@ class ScreenResult:
     sector_relative_peer_count: Optional[int] = None
     sector_relative_peer_reason: Optional[str] = None
     official_score_source: Optional[str] = None
+    base_total_score: Optional[float] = None
+    market_regime_score_delta: Optional[float] = None
     legacy_total_score: Optional[float] = None
     legacy_raw_score: Optional[float] = None
     legacy_adjusted_score: Optional[float] = None
@@ -841,6 +848,12 @@ class ScreeningReport:
     sector_aware_average_peer_count: Optional[float] = None
     sector_aware_min_peer_count: Optional[int] = None
     sector_aware_max_peer_count: Optional[int] = None
+    market_context: Dict[str, Any] = field(default_factory=dict)
+    configured_composite_weights: Dict[str, float] = field(default_factory=dict)
+    effective_composite_weights: Dict[str, float] = field(default_factory=dict)
+    market_regime: str = MARKET_REGIME_NEUTRAL
+    market_regime_status: str = MARKET_REGIME_STATUS_INSUFFICIENT
+    market_regime_signals: Dict[str, str] = field(default_factory=dict)
 
 
 def _canonicalize_record(payload: Dict[str, Any]) -> StockRecord:
@@ -2544,6 +2557,185 @@ def _metadata_coverage(records: Sequence[StockRecord]) -> Dict[str, Any]:
     }
 
 
+def load_market_context(path: Path | str) -> Dict[str, Any]:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("market context sidecar must be a JSON object")
+    return payload
+
+
+def _configured_composite_weights(strategy_mode: str, config: ScreenConfig) -> Dict[str, float]:
+    if strategy_mode == "hybrid":
+        return {
+            "fundamental": config.fundamental_weight,
+            "momentum": config.momentum_weight,
+            "risk_safety": config.risk_weight,
+        }
+    return dict(get_strategy_weights(strategy_mode))
+
+
+def _effective_composite_weights(strategy_mode: str, regime: str, configured: Dict[str, float]) -> Dict[str, float]:
+    effective = dict(configured)
+    if strategy_mode == "hybrid":
+        if regime == MARKET_REGIME_RISK_ON:
+            effective["momentum"] += 0.05
+            effective["risk_safety"] -= 0.05
+        elif regime == MARKET_REGIME_RISK_OFF:
+            effective["fundamental"] -= 0.05
+            effective["momentum"] -= 0.05
+            effective["risk_safety"] += 0.10
+    elif strategy_mode == "stop_checking_price" and regime == MARKET_REGIME_RISK_OFF:
+        effective["momentum"] -= 0.05
+        effective["risk_safety"] += 0.05
+    total = sum(effective.values())
+    if abs(total - 1.0) > 1e-9:
+        raise ValueError(f"effective composite weights must sum to 1.0, got {total}")
+    return {key: _safe_round(value, 3) or 0.0 for key, value in effective.items()}
+
+
+def _classify_market_regime(market_context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(market_context, dict):
+        return {
+            "market_regime": MARKET_REGIME_NEUTRAL,
+            "market_regime_status": MARKET_REGIME_STATUS_INSUFFICIENT,
+            "market_regime_signals": {},
+            "market_context": {},
+        }
+    spy_close = _coerce_float(market_context.get("spy_close"))
+    spy_sma200 = _coerce_float(market_context.get("spy_sma200"))
+    qqq_close = _coerce_float(market_context.get("qqq_close"))
+    qqq_sma200 = _coerce_float(market_context.get("qqq_sma200"))
+    vix_close = _coerce_float(market_context.get("vix_close"))
+    breadth = _coerce_float(market_context.get("breadth_above_200dma"))
+    signals: Dict[str, str] = {}
+    if spy_close is not None and spy_sma200 not in (None, 0):
+        signals["spy"] = MARKET_REGIME_RISK_ON if spy_close > spy_sma200 else MARKET_REGIME_RISK_OFF
+    else:
+        signals["spy"] = "missing"
+    if qqq_close is not None and qqq_sma200 not in (None, 0):
+        signals["qqq"] = MARKET_REGIME_RISK_ON if qqq_close > qqq_sma200 else MARKET_REGIME_RISK_OFF
+    else:
+        signals["qqq"] = "missing"
+    if vix_close is None:
+        signals["vix"] = "missing"
+    elif vix_close < 20:
+        signals["vix"] = MARKET_REGIME_RISK_ON
+    elif vix_close >= 25:
+        signals["vix"] = MARKET_REGIME_RISK_OFF
+    else:
+        signals["vix"] = MARKET_REGIME_NEUTRAL
+    if breadth is None:
+        signals["breadth"] = "missing"
+    elif breadth >= 0.60:
+        signals["breadth"] = MARKET_REGIME_RISK_ON
+    elif breadth <= 0.40:
+        signals["breadth"] = MARKET_REGIME_RISK_OFF
+    else:
+        signals["breadth"] = MARKET_REGIME_NEUTRAL
+
+    valid_signals = [value for value in signals.values() if value != "missing"]
+    risk_on_count = sum(1 for value in valid_signals if value == MARKET_REGIME_RISK_ON)
+    risk_off_count = sum(1 for value in valid_signals if value == MARKET_REGIME_RISK_OFF)
+    if len(valid_signals) < 3:
+        regime = MARKET_REGIME_NEUTRAL
+        status = MARKET_REGIME_STATUS_INSUFFICIENT
+    elif risk_on_count >= 3 and risk_off_count == 0:
+        regime = MARKET_REGIME_RISK_ON
+        status = MARKET_REGIME_STATUS_ENABLED
+    elif risk_off_count >= 3 and risk_on_count == 0:
+        regime = MARKET_REGIME_RISK_OFF
+        status = MARKET_REGIME_STATUS_ENABLED
+    else:
+        regime = MARKET_REGIME_NEUTRAL
+        status = MARKET_REGIME_STATUS_ENABLED
+    return {
+        "market_regime": regime,
+        "market_regime_status": status,
+        "market_regime_signals": signals,
+        "market_context": {
+            "as_of_date": market_context.get("as_of_date"),
+            "spy_close": spy_close,
+            "spy_sma200": _coerce_float(market_context.get("spy_sma200")),
+            "qqq_close": qqq_close,
+            "qqq_sma200": _coerce_float(market_context.get("qqq_sma200")),
+            "vix_close": vix_close,
+            "breadth_above_200dma": breadth,
+            "breadth_eligible_count": _coerce_int(market_context.get("breadth_eligible_count")),
+            "market_context_source": market_context.get("market_context_source"),
+        },
+    }
+
+
+def _apply_market_regime_overlay(
+    candidates: Sequence[ScreenResult],
+    strategy_mode: str,
+    configured_weights: Dict[str, float],
+    effective_weights: Dict[str, float],
+    market_regime: str,
+    market_regime_status: str,
+    *,
+    as_of: Optional[date],
+    force_rebalance: bool,
+) -> None:
+    review_flag = force_rebalance or is_rebalance_window(as_of)
+    overlay_enabled = market_regime_status == MARKET_REGIME_STATUS_ENABLED and market_regime != MARKET_REGIME_NEUTRAL
+    for item in candidates:
+        item.base_total_score = item.total_score
+        if not overlay_enabled or item.total_score is None:
+            item.market_regime_score_delta = 0.0 if item.total_score is not None else None
+            continue
+        regime_raw_score = weighted_average_available(
+            {
+                "fundamental": item.fundamental_score,
+                "momentum": item.momentum_score,
+                "risk_safety": item.risk_safety_score,
+            },
+            effective_weights,
+        )
+        if regime_raw_score is None:
+            item.market_regime_score_delta = 0.0 if item.base_total_score is not None else None
+            continue
+        if strategy_mode == "stop_checking_price":
+            penalty_score = item.penalty_score or 0.0
+            confidence_multiplier = item.confidence_multiplier or 1.0
+            adjusted_before_confidence = max(0.0, regime_raw_score - penalty_score)
+            adjusted_score = max(0.0, min(100.0, adjusted_before_confidence * confidence_multiplier))
+            item.raw_score = _safe_round(regime_raw_score)
+            item.adjusted_score = _safe_round(adjusted_score)
+            item.final_score = _safe_round(adjusted_score)
+            item.total_score = _safe_round(adjusted_score)
+            item.factor_scores["raw_score"] = item.raw_score
+            item.factor_scores["adjusted_score"] = item.adjusted_score
+            item.factor_scores["final_score"] = item.final_score
+            item.factor_scores["total"] = item.total_score
+            if item.record is not None and item.confidence_score is not None:
+                max_action = _stop_max_action(item.record, item.confidence_score)
+                critical_missing = bool(_stop_strict_action_cap_missing(item.record))
+                item.suggested_action = assign_stop_checking_price_action(
+                    item.total_score or 0.0,
+                    item.confidence_score,
+                    review_flag,
+                    False,
+                    critical_missing,
+                    max_action,
+                )
+        else:
+            item.raw_score = _safe_round(regime_raw_score)
+            item.adjusted_score = _safe_round(regime_raw_score)
+            item.final_score = _safe_round(regime_raw_score)
+            item.total_score = _safe_round(regime_raw_score)
+            item.factor_scores["total"] = item.total_score
+            if item.record is not None:
+                item.suggested_action, item.action_cap_reason = assign_hybrid_action(
+                    item.record,
+                    item.total_score,
+                    item.risk_safety_score,
+                )
+        if item.base_total_score is not None and item.total_score is not None:
+            item.market_regime_score_delta = _safe_round(item.total_score - item.base_total_score)
+        else:
+            item.market_regime_score_delta = None
+
 def _disable_official_sector_aware(candidates: Sequence[ScreenResult]) -> None:
     for item in candidates:
         if item.legacy_total_score is None:
@@ -2909,6 +3101,7 @@ def screen_records(
     as_of: Optional[date] = None,
     force_rebalance: bool = False,
     min_score: Optional[float] = None,
+    market_context: Optional[Dict[str, Any]] = None,
 ) -> ScreeningReport:
     config = config or ScreenConfig()
     strategy_mode = _normalize_strategy_mode(strategy_mode)
@@ -2923,6 +3116,13 @@ def screen_records(
     metadata_summary = _metadata_coverage(scored_records)
     sector_aware_enabled = (metadata_summary["sector_metadata_coverage"] or 0.0) >= SECTOR_METADATA_COVERAGE_GATE
     sector_aware_status = "enabled" if sector_aware_enabled else "disabled_insufficient_sector_metadata"
+    configured_composite_weights = _configured_composite_weights(strategy_mode, config)
+    market_regime_summary = _classify_market_regime(market_context)
+    effective_composite_weights = _effective_composite_weights(
+        strategy_mode,
+        market_regime_summary["market_regime"],
+        configured_composite_weights,
+    )
     candidates = [item for item in scored if item.is_candidate]
     excluded = [item for item in scored if not item.is_candidate]
     hard_pass_count = len(candidates)
@@ -2940,6 +3140,16 @@ def screen_records(
         promote_sector_relative_scores(candidates, strategy_mode, config=config, review_flag=review_flag)
     else:
         _disable_official_sector_aware(candidates)
+    _apply_market_regime_overlay(
+        candidates,
+        strategy_mode,
+        configured_composite_weights,
+        effective_composite_weights,
+        market_regime_summary["market_regime"],
+        market_regime_summary["market_regime_status"],
+        as_of=as_of,
+        force_rebalance=force_rebalance,
+    )
 
     if strategy_mode == "stop_checking_price":
         candidates.sort(
@@ -3079,6 +3289,12 @@ def screen_records(
         sector_aware_average_peer_count=sector_relative_summary["sector_aware_average_peer_count"],
         sector_aware_min_peer_count=sector_relative_summary["sector_aware_min_peer_count"],
         sector_aware_max_peer_count=sector_relative_summary["sector_aware_max_peer_count"],
+        market_context=market_regime_summary["market_context"],
+        configured_composite_weights=configured_composite_weights,
+        effective_composite_weights=effective_composite_weights,
+        market_regime=market_regime_summary["market_regime"],
+        market_regime_status=market_regime_summary["market_regime_status"],
+        market_regime_signals=market_regime_summary["market_regime_signals"],
     )
 
 
@@ -3117,6 +3333,12 @@ def _render_markdown(report: ScreeningReport) -> str:
     lines.append(f"- metadata_fetch_failed_count：{report.metadata_fetch_failed_count}")
     lines.append(f"- metadata_missing_count：{report.metadata_missing_count}")
     lines.append(f"- sector_aware_status：{report.sector_aware_status}")
+    lines.append(f"- market_regime：{report.market_regime}")
+    lines.append(f"- market_regime_status：{report.market_regime_status}")
+    lines.append(f"- market_regime_signals：{json.dumps(report.market_regime_signals, ensure_ascii=False)}")
+    lines.append(f"- configured_composite_weights：{json.dumps(report.configured_composite_weights, ensure_ascii=False)}")
+    lines.append(f"- effective_composite_weights：{json.dumps(report.effective_composite_weights, ensure_ascii=False)}")
+    lines.append(f"- market_context：{json.dumps(report.market_context, ensure_ascii=False)}")
     lines.append(f"- sector_aware_official_scoring：{'啟用' if report.sector_aware_official_scoring else '未啟用'}")
     lines.append(f"- sector_aware_shadow_mode：{'啟用' if report.sector_aware_shadow_mode else '未啟用'}")
     lines.append(f"- sector_aware_preview_available_count：{report.sector_aware_preview_available_count}")
@@ -3162,16 +3384,18 @@ def _render_markdown(report: ScreeningReport) -> str:
     lines.append("")
     lines.append("## 候選名單")
     lines.append("")
-    lines.append("| 排名 | Ticker | 總分 | Official source | Legacy score | Sector-aware preview | Peer source | Peer count | Peer reason | 資料品質 | 動作 | 基本面 | 動量 | 風險安全 | 主要理由 | 風險警示 |")
-    lines.append("| --- | --- | ---: | --- | ---: | --- | --- | ---: | --- | ---: | --- | ---: | ---: | ---: | --- | --- |")
+    lines.append("| 排名 | Ticker | 總分 | Base score | Regime delta | Official source | Legacy score | Sector-aware preview | Peer source | Peer count | Peer reason | 資料品質 | 動作 | 基本面 | 動量 | 風險安全 | 主要理由 | 風險警示 |")
+    lines.append("| --- | --- | ---: | ---: | ---: | --- | ---: | --- | --- | ---: | --- | ---: | --- | ---: | ---: | ---: | --- | --- |")
     for index, item in enumerate(report.candidates, start=1):
         warnings = "；".join(item.risk_warnings) if item.risk_warnings else "無"
         reasons = "；".join(item.reasons)
         lines.append(
-            "| {rank} | {ticker} | {total} | {official_source} | {legacy_total} | {sector_preview} | {peer_source} | {peer_count} | {peer_reason} | {data_quality} | {action} | {fundamental} | {momentum} | {risk} | {reasons} | {warnings} |".format(
+            "| {rank} | {ticker} | {total} | {base_total} | {regime_delta} | {official_source} | {legacy_total} | {sector_preview} | {peer_source} | {peer_count} | {peer_reason} | {data_quality} | {action} | {fundamental} | {momentum} | {risk} | {reasons} | {warnings} |".format(
                 rank=index,
                 ticker=item.ticker,
                 total=item.total_score if item.total_score is not None else "",
+                base_total=item.base_total_score if item.base_total_score is not None else "",
+                regime_delta=item.market_regime_score_delta if item.market_regime_score_delta is not None else "",
                 official_source=item.official_score_source or "",
                 legacy_total=item.legacy_total_score if item.legacy_total_score is not None else "",
                 sector_preview=_format_sector_relative_preview(item),
@@ -3287,11 +3511,19 @@ def _render_json(report: ScreeningReport) -> str:
         "sector_aware_large_rank_change_count": report.sector_aware_large_rank_change_count,
         "sector_aware_large_rank_change_threshold": report.sector_aware_large_rank_change_threshold,
         "sector_aware_largest_movers": report.sector_aware_largest_movers,
+        "market_context": report.market_context,
+        "configured_composite_weights": report.configured_composite_weights,
+        "effective_composite_weights": report.effective_composite_weights,
+        "market_regime": report.market_regime,
+        "market_regime_status": report.market_regime_status,
+        "market_regime_signals": report.market_regime_signals,
         "candidates": [
             {
                 "ticker": item.ticker,
                 "strategy_mode": item.strategy_mode,
                 "total_score": item.total_score,
+                "base_total_score": item.base_total_score,
+                "market_regime_score_delta": item.market_regime_score_delta,
                 "legacy_total_score": item.legacy_total_score,
                 "legacy_raw_score": item.legacy_raw_score,
                 "legacy_adjusted_score": item.legacy_adjusted_score,
@@ -3376,6 +3608,7 @@ def build_report(
     as_of: Optional[date] = None,
     force_rebalance: bool = False,
     min_score: Optional[float] = None,
+    market_context: Optional[Dict[str, Any]] = None,
 ) -> ScreeningReport:
     canonical_records: List[StockRecord] = []
     for record in records:
@@ -3391,12 +3624,14 @@ def build_report(
         as_of=as_of,
         force_rebalance=force_rebalance,
         min_score=min_score,
+        market_context=market_context,
     )
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Rank a US stock universe with hybrid scoring.")
     parser.add_argument("--input", required=True, help="CSV, JSON, or JSONL file with one row per ticker")
+    parser.add_argument("--market-context", help="Optional market context sidecar JSON generated by fetch_yfinance_snapshot.py")
     parser.add_argument("--config", help="Optional JSON config file")
     parser.add_argument("--format", choices=("markdown", "json"), default="markdown")
     parser.add_argument("--top-n", type=int, default=20)
@@ -3425,6 +3660,7 @@ def _load_as_of(value: Optional[str]) -> Optional[date]:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     records = load_records(Path(args.input))
+    market_context = load_market_context(args.market_context) if args.market_context else None
     config = _load_config(args.config)
     as_of = _load_as_of(args.as_of)
     report = screen_records(
@@ -3435,6 +3671,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         as_of=as_of,
         force_rebalance=args.force_rebalance,
         min_score=args.min_score,
+        market_context=market_context,
     )
     if args.format == "json":
         print(_render_json(report))

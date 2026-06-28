@@ -18,12 +18,15 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from fetch_yfinance_snapshot import (  # noqa: E402
+    DEFAULT_MARKET_CONTEXT_PATH,
     DEFAULT_SNAPSHOT_PATH,
     DEFAULT_WATCHLIST_PATH,
     YFinanceUnavailableError,
+    build_market_context,
     fetch_snapshot,
     load_snapshot,
     load_watchlist,
+    save_market_context,
     save_snapshot,
 )
 from us_stock_screener import (  # noqa: E402
@@ -947,10 +950,13 @@ class ScreenerApp(tk.Tk):
                     return
                 self.worker_queue.put(("status", "資料已抓到，正在儲存 snapshot 並計算排名。"))
                 snapshot_path = save_snapshot(bundle, DEFAULT_SNAPSHOT_PATH)
+                market_context = build_market_context(bundle.records)
+                save_market_context(market_context, DEFAULT_MARKET_CONTEXT_PATH)
                 payload = self._build_render_payload(
                     bundle.records,
                     f"yfinance snapshot ({source_text})",
                     bundle=bundle,
+                    market_context=market_context,
                     strategy_mode=strategy_mode,
                     force_rebalance=force_rebalance,
                 )
@@ -1096,6 +1102,7 @@ class ScreenerApp(tk.Tk):
         source_name: str,
         *,
         bundle=None,
+        market_context=None,
         strategy_mode: str,
         force_rebalance: bool,
     ):
@@ -1111,6 +1118,7 @@ class ScreenerApp(tk.Tk):
             strategy_mode=strategy_mode,
             as_of=as_of,
             force_rebalance=force_rebalance,
+            market_context=market_context,
         )
         table_rows = []
         for index, item in enumerate(report.candidates, start=1):
@@ -1140,11 +1148,12 @@ class ScreenerApp(tk.Tk):
             "output_text": report_to_text(report, source_name, bundle=bundle),
         }
 
-    def _render_records(self, records, source_name: str, bundle=None) -> None:
+    def _render_records(self, records, source_name: str, bundle=None, market_context=None) -> None:
         payload = self._build_render_payload(
             records,
             source_name,
             bundle=bundle,
+            market_context=market_context,
             strategy_mode=self._selected_strategy_mode(),
             force_rebalance=self._selected_force_rebalance(),
         )
@@ -1238,6 +1247,8 @@ class ScreenerApp(tk.Tk):
         lines = [
             f"{item.ticker}",
             f"總分：{item.total_score}",
+            f"Base score：{item.base_total_score if item.base_total_score is not None else 'N/A'}",
+            f"Regime delta：{item.market_regime_score_delta if item.market_regime_score_delta is not None else 'N/A'}",
             f"Official source：{item.official_score_source or 'N/A'}",
             f"Legacy score：{item.legacy_total_score if item.legacy_total_score is not None else 'N/A'}",
             f"原始分：{item.raw_score}",
@@ -1344,6 +1355,12 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
         f"metadata_fetch_failed_count：{report.metadata_fetch_failed_count}",
         f"metadata_missing_count：{report.metadata_missing_count}",
         f"sector_aware_status：{report.sector_aware_status}",
+        f"market_regime：{report.market_regime}",
+        f"market_regime_status：{report.market_regime_status}",
+        f"market_regime_signals：{report.market_regime_signals}",
+        f"configured_composite_weights：{report.configured_composite_weights}",
+        f"effective_composite_weights：{report.effective_composite_weights}",
+        f"market_context：{report.market_context}",
         f"sector_aware_official_scoring：{'啟用' if report.sector_aware_official_scoring else '未啟用'}",
         f"sector_aware_shadow_mode：{'啟用' if report.sector_aware_shadow_mode else '未啟用'}",
         f"sector_aware_preview_available_count：{report.sector_aware_preview_available_count}",
@@ -1397,6 +1414,8 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
     for index, item in enumerate(report.candidates, start=1):
         lines.append(f"{index}. {item.ticker}")
         lines.append(f"   總分：{item.total_score}")
+        lines.append(f"   Base score：{item.base_total_score if item.base_total_score is not None else 'N/A'}")
+        lines.append(f"   Regime delta：{item.market_regime_score_delta if item.market_regime_score_delta is not None else 'N/A'}")
         lines.append(f"   Official source：{item.official_score_source or 'N/A'}")
         lines.append(f"   Legacy score：{item.legacy_total_score if item.legacy_total_score is not None else 'N/A'}")
         lines.append(f"   Sector-aware preview：{_format_sector_relative_preview(item) or 'N/A'}")

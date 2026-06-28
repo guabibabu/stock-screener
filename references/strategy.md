@@ -35,6 +35,59 @@ The default report is fixed:
 - `momentum`: 35%
 - `risk_safety`: 25%
 
+## Market Regime Overlay
+
+Market regime is a report-level overlay. It does not add new factors, does not change hard filters, and does not replace the official score source selected by the Phase 2D metadata gate.
+
+Required market context sidecar fields:
+
+- `as_of_date`
+- `spy_close`
+- `spy_sma200`
+- `qqq_close`
+- `qqq_sma200`
+- `vix_close`
+- `breadth_above_200dma`
+- `breadth_eligible_count`
+- `market_context_source`
+
+Signal rules:
+
+- `SPY > 200DMA` => risk-on
+- `SPY < 200DMA` => risk-off
+- `QQQ > 200DMA` => risk-on
+- `QQQ < 200DMA` => risk-off
+- `VIX < 20` => risk-on
+- `VIX >= 25` => risk-off
+- `0.40 < breadth < 0.60` => neutral
+
+Classification:
+
+- fewer than 3 valid signals => `market_regime = neutral`, `market_regime_status = insufficient_market_data`
+- 3 or more risk-on signals and no risk-off signals => `risk_on`
+- 3 or more risk-off signals and no risk-on signals => `risk_off`
+- otherwise => `neutral`
+
+Hybrid effective composite weights:
+
+- `risk_on`: momentum +5 pts, risk_safety -5 pts
+- `neutral`: no change
+- `risk_off`: fundamental -5 pts, momentum -5 pts, risk_safety +10 pts
+
+Stop effective composite weights:
+
+- `risk_on`: no change
+- `neutral`: no change
+- `risk_off`: momentum -5 pts, risk_safety +5 pts
+
+Score provenance:
+
+- `base_total_score` = official score before regime overlay
+- `total_score` = final score after regime overlay
+- `market_regime_score_delta` = `total_score - base_total_score`
+
+For stop mode, the regime score must still go through the same penalty, confidence multiplier, and action-cap path as the base official score.
+
 ## Stop Checking Price Mode
 
 Use this mode when you want to review a company snapshot instead of reacting to short-term price noise.

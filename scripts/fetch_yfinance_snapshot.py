@@ -18,6 +18,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 SKILL_ROOT = SCRIPT_DIR.parent
 DEFAULT_WATCHLIST_PATH = SKILL_ROOT / "references" / "sample-watchlist.csv"
 DEFAULT_SNAPSHOT_PATH = SKILL_ROOT / "data" / "latest_snapshot.json"
+DEFAULT_MARKET_CONTEXT_PATH = SKILL_ROOT / "data" / "latest_snapshot.market-context.json"
 DEFAULT_BATCH_SIZE = 25
 DEFAULT_RETRY_ATTEMPTS = 2
 RETRYABLE_ERROR_KEYWORDS = (
@@ -30,6 +31,7 @@ RETRYABLE_ERROR_KEYWORDS = (
     "rate limit",
     "remote end closed",
 )
+MARKET_CONTEXT_INDEX_TICKERS = ("SPY", "QQQ", "^VIX")
 
 
 class YFinanceUnavailableError(RuntimeError):
@@ -439,6 +441,139 @@ def _build_record(
         },
     }
     return record
+
+
+def _history_lookup(history_rows: List[Dict[str, Any]]) -> Dict[date, float]:
+    lookup: Dict[date, float] = {}
+    for row in history_rows:
+        row_date = _date_from_row(row)
+        close = _close_from_row(row)
+        if row_date is not None and close is not None and close > 0:
+            lookup[row_date] = close
+    return lookup
+
+
+def _sma_up_to_date(history_rows: List[Dict[str, Any]], target_date: date, window: int) -> Optional[float]:
+    closes: List[float] = []
+    for row in history_rows:
+        row_date = _date_from_row(row)
+        close = _close_from_row(row)
+        if row_date is None or close is None or close <= 0:
+            continue
+        if row_date <= target_date:
+            closes.append(close)
+    return _moving_average(closes, window)
+
+
+def _derive_market_context_path(snapshot_path: Path | str) -> Path:
+    path = Path(snapshot_path)
+    suffix = path.suffix or ".json"
+    if suffix == ".json":
+        return path.with_name(f"{path.stem}.market-context.json")
+    return path.with_name(f"{path.name}.market-context.json")
+
+
+def build_market_context(
+    records: Sequence[Dict[str, Any]],
+    *,
+    provider: Optional[Any] = None,
+    retry_attempts: int = DEFAULT_RETRY_ATTEMPTS,
+) -> Dict[str, Any]:
+    provider = provider or YFinanceProvider()
+    index_payloads: Dict[str, Dict[str, Any]] = {}
+    for ticker in MARKET_CONTEXT_INDEX_TICKERS:
+        try:
+            payload, _retries_used, _retry_failed = _fetch_with_retries(provider, ticker, retry_attempts)
+        except Exception:
+            payload = {}
+        index_payloads[ticker] = payload if isinstance(payload, dict) else {}
+
+    index_histories = {
+        ticker: _rows_from_history(payload.get("history"))
+        for ticker, payload in index_payloads.items()
+    }
+    date_sets = []
+    for ticker in MARKET_CONTEXT_INDEX_TICKERS:
+        lookup = _history_lookup(index_histories.get(ticker, []))
+        if lookup:
+            date_sets.append(set(lookup.keys()))
+    common_dates = set.intersection(*date_sets) if len(date_sets) == len(MARKET_CONTEXT_INDEX_TICKERS) else set()
+    latest_common_date = max(common_dates) if common_dates else None
+
+    market_context = {
+        "as_of_date": latest_common_date.isoformat() if latest_common_date is not None else None,
+        "spy_close": None,
+        "spy_sma200": None,
+        "qqq_close": None,
+        "qqq_sma200": None,
+        "vix_close": None,
+        "breadth_above_200dma": None,
+        "breadth_eligible_count": 0,
+        "market_context_source": "yfinance_sidecar",
+    }
+    if latest_common_date is not None:
+        spy_lookup = _history_lookup(index_histories.get("SPY", []))
+        qqq_lookup = _history_lookup(index_histories.get("QQQ", []))
+        vix_lookup = _history_lookup(index_histories.get("^VIX", []))
+        market_context["spy_close"] = spy_lookup.get(latest_common_date)
+        market_context["qqq_close"] = qqq_lookup.get(latest_common_date)
+        market_context["vix_close"] = vix_lookup.get(latest_common_date)
+        market_context["spy_sma200"] = _sma_up_to_date(index_histories.get("SPY", []), latest_common_date, 200)
+        market_context["qqq_sma200"] = _sma_up_to_date(index_histories.get("QQQ", []), latest_common_date, 200)
+
+    breadth_eligible = 0
+    breadth_above = 0
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        value = _coerce_float(_pick(record, "price_vs_sma200_pct", "price_vs_200dma"))
+        if value is None:
+            continue
+        breadth_eligible += 1
+        if value >= 0:
+            breadth_above += 1
+    market_context["breadth_eligible_count"] = breadth_eligible
+    if breadth_eligible > 0:
+        market_context["breadth_above_200dma"] = round(breadth_above / breadth_eligible, 3)
+    signals = {
+        "spy": "missing",
+        "qqq": "missing",
+        "vix": "missing",
+        "breadth": "missing",
+    }
+    spy_close = _coerce_float(market_context.get("spy_close"))
+    spy_sma200 = _coerce_float(market_context.get("spy_sma200"))
+    if spy_close is not None and spy_sma200 not in (None, 0):
+        signals["spy"] = "risk_on" if spy_close > spy_sma200 else "risk_off"
+    qqq_close = _coerce_float(market_context.get("qqq_close"))
+    qqq_sma200 = _coerce_float(market_context.get("qqq_sma200"))
+    if qqq_close is not None and qqq_sma200 not in (None, 0):
+        signals["qqq"] = "risk_on" if qqq_close > qqq_sma200 else "risk_off"
+    vix_close = _coerce_float(market_context.get("vix_close"))
+    if vix_close is not None:
+        if vix_close < 20:
+            signals["vix"] = "risk_on"
+        elif vix_close >= 25:
+            signals["vix"] = "risk_off"
+        else:
+            signals["vix"] = "neutral"
+    breadth = _coerce_float(market_context.get("breadth_above_200dma"))
+    if breadth is not None:
+        if breadth >= 0.60:
+            signals["breadth"] = "risk_on"
+        elif breadth <= 0.40:
+            signals["breadth"] = "risk_off"
+        else:
+            signals["breadth"] = "neutral"
+    market_context["signals"] = signals
+    return market_context
+
+
+def save_market_context(context: Dict[str, Any], path: Path | str) -> Path:
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(context, ensure_ascii=False, indent=2), encoding="utf-8")
+    return output_path
 
 
 def _failed_record(ticker: str, error: str, *, as_of: Optional[date] = None) -> Dict[str, Any]:
@@ -851,6 +986,13 @@ def load_snapshot(path: Path | str) -> SnapshotBundle:
     )
 
 
+def load_market_context(path: Path | str) -> Dict[str, Any]:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("Market context sidecar must contain a JSON object")
+    return payload
+
+
 def build_summary(bundle: SnapshotBundle) -> str:
     lines = [
         f"來源：{bundle.source_name}",
@@ -899,13 +1041,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     tickers = _resolve_tickers(args)
     bundle = fetch_snapshot(tickers, batch_size=args.batch_size, retry_attempts=args.retry_attempts)
     output_path = save_snapshot(bundle, args.output)
+    market_context = build_market_context(bundle.records, retry_attempts=args.retry_attempts)
+    market_context_path = save_market_context(market_context, _derive_market_context_path(args.output))
     print(f"已儲存快照：{output_path}")
+    print(f"已儲存市場 context：{market_context_path}")
     print(build_summary(bundle))
 
     if args.screen:
         from us_stock_screener import build_report
 
-        report = build_report(bundle.records)
+        report = build_report(bundle.records, market_context=market_context)
         if args.format == "json":
             print(json.dumps(report_to_payload(report), ensure_ascii=False, indent=2))
         else:
@@ -927,11 +1072,19 @@ def report_to_payload(report: Any) -> Dict[str, Any]:
         "metadata_fetch_failed_count": report.metadata_fetch_failed_count,
         "metadata_missing_count": report.metadata_missing_count,
         "sector_aware_status": report.sector_aware_status,
+        "market_context": report.market_context,
+        "configured_composite_weights": report.configured_composite_weights,
+        "effective_composite_weights": report.effective_composite_weights,
+        "market_regime": report.market_regime,
+        "market_regime_status": report.market_regime_status,
+        "market_regime_signals": report.market_regime_signals,
         "dedupe_removed_count": report.dedupe_removed_count,
         "candidates": [
             {
                 "ticker": item.ticker,
                 "total_score": item.total_score,
+                "base_total_score": item.base_total_score,
+                "market_regime_score_delta": item.market_regime_score_delta,
                 "factor_scores": item.factor_scores,
                 "reasons": item.reasons,
                 "risk_warnings": item.risk_warnings,
@@ -968,23 +1121,31 @@ def report_to_markdown(report: Any, bundle: SnapshotBundle) -> str:
         f"- metadata_fetch_failed_count：{report.metadata_fetch_failed_count}",
         f"- metadata_missing_count：{report.metadata_missing_count}",
         f"- sector_aware_status：{report.sector_aware_status}",
+        f"- market_regime：{report.market_regime}",
+        f"- market_regime_status：{report.market_regime_status}",
+        f"- market_regime_signals：{json.dumps(report.market_regime_signals, ensure_ascii=False)}",
+        f"- configured_composite_weights：{json.dumps(report.configured_composite_weights, ensure_ascii=False)}",
+        f"- effective_composite_weights：{json.dumps(report.effective_composite_weights, ensure_ascii=False)}",
+        f"- market_context：{json.dumps(report.market_context, ensure_ascii=False)}",
         f"- dedupe_removed_count：{report.dedupe_removed_count}",
         f"- 通過 {len(report.candidates)} 檔",
         f"- 剔除 {len(report.excluded)} 檔",
         "",
         "## 候選名單",
         "",
-        "| 排名 | Ticker | 總分 | 基本面 | 動量 | 風險安全 | 主要理由 | 風險警示 |",
-        "| --- | --- | ---: | ---: | ---: | ---: | --- | --- |",
+        "| 排名 | Ticker | 總分 | Base score | Regime delta | 基本面 | 動量 | 風險安全 | 主要理由 | 風險警示 |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
     ]
     for index, item in enumerate(report.candidates, start=1):
         warnings = "；".join(item.risk_warnings) if item.risk_warnings else "無"
         reasons = "；".join(item.reasons)
         lines.append(
-            "| {rank} | {ticker} | {total} | {fundamental} | {momentum} | {risk} | {reasons} | {warnings} |".format(
+            "| {rank} | {ticker} | {total} | {base_total} | {regime_delta} | {fundamental} | {momentum} | {risk} | {reasons} | {warnings} |".format(
                 rank=index,
                 ticker=item.ticker,
                 total=item.total_score if item.total_score is not None else "",
+                base_total=item.base_total_score if item.base_total_score is not None else "",
+                regime_delta=item.market_regime_score_delta if item.market_regime_score_delta is not None else "",
                 fundamental=item.factor_scores.get("fundamental") or "",
                 momentum=item.factor_scores.get("momentum") or "",
                 risk=item.factor_scores.get("risk_safety") or "",

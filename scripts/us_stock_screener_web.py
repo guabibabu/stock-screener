@@ -28,11 +28,14 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from fetch_yfinance_snapshot import (  # noqa: E402
     DEFAULT_BATCH_SIZE,
+    DEFAULT_MARKET_CONTEXT_PATH,
     DEFAULT_RETRY_ATTEMPTS,
     DEFAULT_SNAPSHOT_PATH,
     DEFAULT_WATCHLIST_PATH,
+    build_market_context,
     fetch_snapshot,
     load_watchlist,
+    save_market_context,
     save_snapshot,
 )
 from us_stock_screener import build_report, load_records  # noqa: E402
@@ -147,6 +150,8 @@ def _result_to_payload(item: Any) -> Dict[str, Any]:
         "industry": item.record.industry if item.record is not None else None,
         "strategy_mode": item.strategy_mode,
         "total_score": item.total_score,
+        "base_total_score": item.base_total_score,
+        "market_regime_score_delta": item.market_regime_score_delta,
         "legacy_total_score": item.legacy_total_score,
         "legacy_raw_score": item.legacy_raw_score,
         "legacy_adjusted_score": item.legacy_adjusted_score,
@@ -248,6 +253,12 @@ def _report_to_payload(report: Any, *, source_name: str, bundle: Any = None) -> 
         "sector_aware_large_rank_change_count": report.sector_aware_large_rank_change_count,
         "sector_aware_large_rank_change_threshold": report.sector_aware_large_rank_change_threshold,
         "sector_aware_largest_movers": report.sector_aware_largest_movers,
+        "market_context": report.market_context,
+        "configured_composite_weights": report.configured_composite_weights,
+        "effective_composite_weights": report.effective_composite_weights,
+        "market_regime": report.market_regime,
+        "market_regime_status": report.market_regime_status,
+        "market_regime_signals": report.market_regime_signals,
         "snapshot": None
         if bundle is None
         else {
@@ -277,6 +288,7 @@ def _screen_records(
     force_rebalance: bool,
     min_score: Optional[float],
     bundle: Any = None,
+    market_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     as_of = None
     if bundle is not None and getattr(bundle, "as_of", None):
@@ -290,6 +302,7 @@ def _screen_records(
         as_of=as_of,
         force_rebalance=force_rebalance,
         min_score=min_score,
+        market_context=market_context,
     )
     return _report_to_payload(report, source_name=source_name, bundle=bundle)
 
@@ -310,6 +323,7 @@ def run_screen_request(payload: Dict[str, Any]) -> Dict[str, Any]:
             strategy_mode=strategy_mode,
             force_rebalance=force_rebalance,
             min_score=min_score,
+            market_context=None,
         )
 
     if source_mode == "uploaded":
@@ -323,6 +337,7 @@ def run_screen_request(payload: Dict[str, Any]) -> Dict[str, Any]:
                 strategy_mode=strategy_mode,
                 force_rebalance=force_rebalance,
                 min_score=min_score,
+                market_context=None,
             )
         tickers = [str(row).strip().upper() for row in rows if str(row).strip()]
         source_name = filename
@@ -342,6 +357,8 @@ def run_screen_request(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
     if bundle.status != "failed":
         save_snapshot(bundle, DEFAULT_SNAPSHOT_PATH)
+    market_context = build_market_context(bundle.records, retry_attempts=int(payload.get("retry_attempts") or DEFAULT_RETRY_ATTEMPTS))
+    save_market_context(market_context, DEFAULT_MARKET_CONTEXT_PATH)
     return _screen_records(
         bundle.records,
         source_name=f"yfinance snapshot ({source_name})",
@@ -349,6 +366,7 @@ def run_screen_request(payload: Dict[str, Any]) -> Dict[str, Any]:
         force_rebalance=force_rebalance,
         min_score=min_score,
         bundle=bundle,
+        market_context=market_context,
     )
 
 
@@ -620,7 +638,7 @@ INDEX_HTML = r"""<!doctype html>
       setMetric('mPenalty', report.soft_penalty_count);
       setMetric('mMissing', report.missing_data_count);
       setMetric('mFetchFailed', report.fetch_failed_count);
-      $('modePill').textContent = `${report.strategy_mode}｜${report.ranking_style}｜${report.sector_aware_status}｜min_score ${report.min_score ?? '未設定'}｜${report.effective_min_score_source}`;
+      $('modePill').textContent = `${report.strategy_mode}｜${report.ranking_style}｜${report.sector_aware_status}｜${report.market_regime}/${report.market_regime_status}｜min_score ${report.min_score ?? '未設定'}｜${report.effective_min_score_source}`;
 
       const body = $('rows');
       body.innerHTML = '';
@@ -678,6 +696,12 @@ INDEX_HTML = r"""<!doctype html>
         `metadata_fetch_failed_count：${report.metadata_fetch_failed_count}`,
         `metadata_missing_count：${report.metadata_missing_count}`,
         `sector_aware_status：${report.sector_aware_status}`,
+        `market_regime：${report.market_regime}`,
+        `market_regime_status：${report.market_regime_status}`,
+        `market_regime_signals：${JSON.stringify(report.market_regime_signals || {})}`,
+        `configured_composite_weights：${JSON.stringify(report.configured_composite_weights || {})}`,
+        `effective_composite_weights：${JSON.stringify(report.effective_composite_weights || {})}`,
+        `market_context：${JSON.stringify(report.market_context || {})}`,
         `sector_aware_official_scoring：${report.sector_aware_official_scoring ? '啟用' : '未啟用'}`,
         `sector_aware_shadow_mode：${report.sector_aware_shadow_mode ? '啟用' : '未啟用'}`,
         `sector_aware_preview_available_count：${report.sector_aware_preview_available_count}`,
@@ -711,6 +735,8 @@ INDEX_HTML = r"""<!doctype html>
       (report.candidates || []).forEach((item, index) => {
         lines.push(`${index + 1}. ${item.ticker}`);
         lines.push(`   總分：${item.total_score}`);
+        lines.push(`   Base score：${item.base_total_score ?? 'N/A'}`);
+        lines.push(`   Regime delta：${item.market_regime_score_delta ?? 'N/A'}`);
         lines.push(`   Official source：${item.official_score_source ?? 'N/A'}`);
         lines.push(`   Legacy score：${item.legacy_total_score ?? 'N/A'}`);
         lines.push(`   Sector-aware preview：${formatSectorPreview(item) || 'N/A'}`);
@@ -791,6 +817,8 @@ INDEX_HTML = r"""<!doctype html>
       $('detail').textContent = [
         `${item.ticker}`,
         `總分：${item.total_score}`,
+        `Base score：${item.base_total_score ?? 'N/A'}`,
+        `Regime delta：${item.market_regime_score_delta ?? 'N/A'}`,
         `Official source：${item.official_score_source ?? 'N/A'}`,
         `Legacy score：${item.legacy_total_score ?? 'N/A'}`,
         `原始分：${item.raw_score}`,
