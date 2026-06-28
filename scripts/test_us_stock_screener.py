@@ -278,6 +278,33 @@ class ScreenerTests(unittest.TestCase):
         self.assertEqual(metadata["source_data_end_date"], "2026-06-27")
         self.assertFalse(metadata["point_in_time_verified"])
 
+    def test_live_snapshot_source_data_end_date_comes_from_provider_history(self) -> None:
+        provider = FakeProvider(
+            {
+                "META": {
+                    "info": {
+                        "sector": "Technology",
+                        "industry": "Software",
+                        "regularMarketPrice": 100,
+                        "marketCap": 100_000_000_000,
+                        "quoteType": "EQUITY",
+                    },
+                    "history": [
+                        {"Date": "2026-06-24", "Close": 99, "Volume": 900_000},
+                        {"Date": "2026-06-25", "Close": 100, "Volume": 1_000_000},
+                        {"Date": "2026-06-26", "Close": 101, "Volume": 1_100_000},
+                    ],
+                    "errors": [],
+                }
+            }
+        )
+        bundle = fetch_snapshot(["META"], provider=provider, as_of=date(2026, 6, 28))
+        metadata = bundle.to_payload()["metadata"]
+        self.assertEqual(metadata["requested_as_of"], "2026-06-28")
+        self.assertEqual(metadata["as_of"], "2026-06-28")
+        self.assertNotEqual(metadata["source_data_end_date"], "2026-06-28")
+        self.assertEqual(metadata["source_data_end_date"], "2026-06-26")
+
     def test_shares_growth_yoy_is_emitted_in_percent_units(self) -> None:
         provider = FakeProvider(
             {
