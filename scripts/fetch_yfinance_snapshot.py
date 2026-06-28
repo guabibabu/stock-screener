@@ -238,7 +238,7 @@ def _shares_growth_yoy_from_history(shares: Any) -> Optional[float]:
     base_date, base_value = base_candidates[-1] if base_candidates else points[0]
     if base_value <= 0 or base_date == latest_date:
         return None
-    return (latest_value / base_value) - 1.0
+    return ((latest_value / base_value) - 1.0) * 100.0
 
 
 def _history_value(row: Dict[str, Any], *keys: str) -> Any:
@@ -793,7 +793,10 @@ def _chunked(values: Sequence[str], size: int) -> Iterable[Sequence[str]]:
 class SnapshotBundle:
     source_name: str
     as_of: str
+    requested_as_of: str
     fetched_at: str
+    source_data_end_date: Optional[str] = None
+    point_in_time_verified: bool = False
     status: str = "ok"
     records: List[Dict[str, Any]] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
@@ -813,7 +816,10 @@ class SnapshotBundle:
             "metadata": {
                 "source_name": self.source_name,
                 "as_of": self.as_of,
+                "requested_as_of": self.requested_as_of,
                 "fetched_at": self.fetched_at,
+                "source_data_end_date": self.source_data_end_date,
+                "point_in_time_verified": self.point_in_time_verified,
                 "status": self.status,
                 "universe_size": len(self.universe),
                 "record_count": len(self.records),
@@ -848,6 +854,7 @@ def fetch_snapshot(
     warnings: List[str] = []
     errors: List[str] = []
     retry_failed_count = 0
+    source_data_end_dates: List[date] = []
     for batch in _chunked(normalized_tickers, batch_size):
         for ticker in batch:
             try:
@@ -877,6 +884,10 @@ def fetch_snapshot(
                     raw["fetch_failed"] = False
                 if record.get("notes"):
                     warnings.append(f"{ticker}: {record['notes']}")
+                latest_history_text = (record.get("raw") or {}).get("latest_history_date")
+                latest_history_date = _parse_date(latest_history_text)
+                if latest_history_date is not None:
+                    source_data_end_dates.append(latest_history_date)
                 records.append(record)
             except Exception as exc:
                 message = f"{ticker}: {exc}"
@@ -917,7 +928,10 @@ def fetch_snapshot(
     return SnapshotBundle(
         source_name="yfinance",
         as_of=as_of.isoformat(),
+        requested_as_of=as_of.isoformat(),
         fetched_at=datetime.now().isoformat(timespec="seconds"),
+        source_data_end_date=(max(source_data_end_dates).isoformat() if source_data_end_dates else None),
+        point_in_time_verified=False,
         status=status,
         records=records,
         warnings=warnings,
@@ -963,13 +977,17 @@ def load_snapshot(path: Path | str) -> SnapshotBundle:
         raise ValueError("Snapshot records must be a list")
 
     as_of = str(metadata.get("as_of") or metadata.get("date") or date.today().isoformat())
+    requested_as_of = str(metadata.get("requested_as_of") or as_of)
     fetched_at = str(metadata.get("fetched_at") or metadata.get("created_at") or datetime.now().isoformat(timespec="seconds"))
     source_name = str(metadata.get("source_name") or metadata.get("source") or "yfinance")
     status = str(metadata.get("status") or "ok")
     return SnapshotBundle(
         source_name=source_name,
         as_of=as_of,
+        requested_as_of=requested_as_of,
         fetched_at=fetched_at,
+        source_data_end_date=(str(metadata.get("source_data_end_date")) if metadata.get("source_data_end_date") not in (None, "") else None),
+        point_in_time_verified=bool(metadata.get("point_in_time_verified") is True),
         status=status,
         records=records,
         warnings=warnings,
@@ -997,7 +1015,10 @@ def build_summary(bundle: SnapshotBundle) -> str:
     lines = [
         f"來源：{bundle.source_name}",
         f"快照日期：{bundle.as_of}",
+        f"requested_as_of：{bundle.requested_as_of}",
         f"抓取時間：{bundle.fetched_at}",
+        f"source_data_end_date：{bundle.source_data_end_date or 'unknown'}",
+        f"point_in_time_verified：{str(bundle.point_in_time_verified).lower()}",
         f"股票數量：{len(bundle.records)}",
         f"retry_failed_count：{bundle.retry_failed_count}",
         f"fetch_failed_count：{bundle.fetch_failed_count}",
@@ -1019,6 +1040,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--watchlist", help="CSV/JSON/JSONL file with tickers to fetch")
     parser.add_argument("--tickers", help="Comma-separated list of tickers")
     parser.add_argument("--output", help="Snapshot output path", default=str(DEFAULT_SNAPSHOT_PATH))
+    parser.add_argument("--as-of", help="Requested snapshot date (YYYY-MM-DD)")
     parser.add_argument("--screen", action="store_true", help="Run the screener after fetching")
     parser.add_argument("--format", choices=("markdown", "json"), default="markdown")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
@@ -1039,7 +1061,8 @@ def _resolve_tickers(args: argparse.Namespace) -> List[str]:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     tickers = _resolve_tickers(args)
-    bundle = fetch_snapshot(tickers, batch_size=args.batch_size, retry_attempts=args.retry_attempts)
+    requested_as_of = date.fromisoformat(args.as_of) if args.as_of else None
+    bundle = fetch_snapshot(tickers, as_of=requested_as_of, batch_size=args.batch_size, retry_attempts=args.retry_attempts)
     output_path = save_snapshot(bundle, args.output)
     market_context = build_market_context(bundle.records, retry_attempts=args.retry_attempts)
     market_context_path = save_market_context(market_context, _derive_market_context_path(args.output))

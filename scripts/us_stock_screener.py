@@ -522,12 +522,12 @@ STOP_CHECKING_PRICE_SOFT_PENALTIES = [
     ("peg_ratio", ">", 3, 4, "PEG 偏高"),
     ("debt_to_equity", ">", 2.0, 8, "負債權益比偏高"),
     ("net_debt_to_ebitda", ">", 4.0, 8, "淨負債 / EBITDA 偏高"),
-    ("shares_growth_yoy", ">", 0.05, 6, "股本稀釋偏高"),
-    ("shares_growth_3y_cagr", ">", 0.05, 8, "三年股本稀釋偏高"),
-    ("revenue_growth_yoy", "<", -0.05, 6, "營收年增率明顯衰退"),
-    ("eps_growth_yoy", "<", -0.10, 6, "EPS 年增率明顯衰退"),
-    ("max_drawdown_1y", "<", -0.40, 8, "一年最大回撤過深"),
-    ("volatility_1y", ">", 0.80, 6, "一年波動率偏高"),
+    ("shares_growth_yoy", ">", 5.0, 6, "股本稀釋偏高"),
+    ("shares_growth_3y_cagr", ">", 5.0, 8, "三年股本稀釋偏高"),
+    ("revenue_growth_yoy", "<", -5.0, 6, "營收年增率明顯衰退"),
+    ("eps_growth_yoy", "<", -10.0, 6, "EPS 年增率明顯衰退"),
+    ("max_drawdown_1y", "<", -40.0, 8, "一年最大回撤過深"),
+    ("volatility_1y", ">", 80.0, 6, "一年波動率偏高"),
     ("data_age_days", ">", 7, 8, "資料超過 7 天"),
     ("data_age_days", ">", 3, 4, "資料超過 3 天"),
 ]
@@ -554,6 +554,33 @@ STOP_CHECKING_PRICE_DEDUPE_COMPANY_GROUPS = {
     "BRK-B": "BERKSHIRE_HATHAWAY",
     "BRK.A": "BERKSHIRE_HATHAWAY",
     "BRK.B": "BERKSHIRE_HATHAWAY",
+}
+
+STOP_CHECKING_PRICE_PERCENT_FIELDS = {
+    "gross_margin_ttm",
+    "gross_margin",
+    "operating_margin_ttm",
+    "operating_margin",
+    "net_margin_ttm",
+    "roe",
+    "return_on_equity",
+    "roic",
+    "fcf_margin",
+    "fcf_growth_yoy",
+    "revenue_growth_yoy",
+    "eps_growth_yoy",
+    "revenue_growth_3y_cagr",
+    "fcf_conversion",
+    "shares_growth_yoy",
+    "shares_growth_3y_cagr",
+    "price_vs_200dma",
+    "price_vs_sma50_pct",
+    "price_vs_sma200_pct",
+    "max_drawdown_1y",
+    "max_drawdown_252d",
+    "volatility_1y",
+    "volatility_63d",
+    "operating_margin_3y_avg",
 }
 
 SECTOR_RELATIVE_MIN_PEERS = 30
@@ -773,6 +800,7 @@ class ScreenResult:
     sector_relative_peer_count: Optional[int] = None
     sector_relative_peer_reason: Optional[str] = None
     official_score_source: Optional[str] = None
+    official_rank: Optional[int] = None
     base_total_score: Optional[float] = None
     market_regime_score_delta: Optional[float] = None
     legacy_total_score: Optional[float] = None
@@ -797,6 +825,7 @@ class ScreeningReport:
     candidates: List[ScreenResult]
     excluded: List[ScreenResult]
     universe_size: int
+    data_limited_candidates: List[ScreenResult] = field(default_factory=list)
     hard_excluded: List[ScreenResult] = field(default_factory=list)
     soft_penalties: List[Dict[str, Any]] = field(default_factory=list)
     missing_data_warnings: List[Dict[str, Any]] = field(default_factory=list)
@@ -1132,14 +1161,6 @@ def assign_hybrid_action(record: StockRecord, total_score: Optional[float], risk
     return "CANDIDATE", None
 
 
-def _maybe_ratio(value: Optional[float]) -> Optional[float]:
-    if value is None:
-        return None
-    if abs(value) > 1.5 and abs(value) <= 500:
-        return value / 100.0
-    return value
-
-
 def _normalize_debt_to_equity(raw_value: Optional[float]) -> Optional[float]:
     if raw_value is None:
         return None
@@ -1182,8 +1203,11 @@ def _stop_field(record: StockRecord, *names: str) -> Optional[float]:
     return None
 
 
-def _stop_ratio_field(record: StockRecord, *names: str) -> Optional[float]:
-    return _maybe_ratio(_stop_field(record, *names))
+def _stop_percent_field(record: StockRecord, *names: str) -> Optional[float]:
+    for name in names:
+        if name not in STOP_CHECKING_PRICE_PERCENT_FIELDS:
+            raise ValueError(f"Field {name} is not declared as a stop-mode percent field")
+    return _stop_field(record, *names)
 
 
 def apply_stop_checking_price_extra_filters(record: StockRecord) -> List[str]:
@@ -1218,11 +1242,11 @@ def _with_borderline_reason(reason: str, severity: str) -> str:
 def apply_stop_checking_price_extra_filter_details(record: StockRecord) -> List[Dict[str, Any]]:
     details: List[Dict[str, Any]] = []
     data_age_days = _record_age_days(record, "price")
-    operating_margin_ttm = _stop_ratio_field(record, "operating_margin_ttm")
+    operating_margin_ttm = _stop_percent_field(record, "operating_margin_ttm")
     operating_margin_raw = _stop_field(record, "operating_margin_ttm")
     debt_to_equity = _debt_to_equity_normalized(record)
     debt_to_equity_raw = record.debt_to_equity_raw if record.debt_to_equity_raw is not None else record.debt_to_equity
-    shares_growth_yoy = _stop_ratio_field(record, "shares_growth_yoy")
+    shares_growth_yoy = _stop_percent_field(record, "shares_growth_yoy")
     shares_growth_raw = _stop_field(record, "shares_growth_yoy")
     sector_aware = _is_sector_aware_debt_sector(record)
     if data_age_days is not None and data_age_days > 30:
@@ -1239,8 +1263,8 @@ def apply_stop_checking_price_extra_filter_details(record: StockRecord) -> List[
                 "threshold": 30,
             }
         )
-    if operating_margin_ttm is not None and operating_margin_ttm < -0.20:
-        severity = _borderline_exclusion_severity(operating_margin_ttm, -0.20, direction="below")
+    if operating_margin_ttm is not None and operating_margin_ttm < -20.0:
+        severity = _borderline_exclusion_severity(operating_margin_ttm, -20.0, direction="below")
         reason = _with_borderline_reason("營業利益率嚴重為負", severity)
         details.append(
             {
@@ -1250,7 +1274,7 @@ def apply_stop_checking_price_extra_filter_details(record: StockRecord) -> List[
                 "field": "operating_margin_ttm",
                 "raw_value": operating_margin_raw,
                 "normalized_value": operating_margin_ttm,
-                "threshold": -0.20,
+                "threshold": -20.0,
             }
         )
     if debt_to_equity is not None and not sector_aware and debt_to_equity > 10:
@@ -1267,8 +1291,8 @@ def apply_stop_checking_price_extra_filter_details(record: StockRecord) -> List[
                 "threshold": 10,
             }
         )
-    if shares_growth_yoy is not None and shares_growth_yoy > 0.20:
-        severity = _borderline_exclusion_severity(shares_growth_yoy, 0.20, direction="above")
+    if shares_growth_yoy is not None and shares_growth_yoy > 20.0:
+        severity = _borderline_exclusion_severity(shares_growth_yoy, 20.0, direction="above")
         reason = _with_borderline_reason("股本稀釋嚴重", severity)
         details.append(
             {
@@ -1278,7 +1302,7 @@ def apply_stop_checking_price_extra_filter_details(record: StockRecord) -> List[
                 "field": "shares_growth_yoy",
                 "raw_value": shares_growth_raw,
                 "normalized_value": shares_growth_yoy,
-                "threshold": 0.20,
+                "threshold": 20.0,
             }
         )
     return details
@@ -1319,7 +1343,7 @@ def calculate_stop_checking_price_penalties(record: StockRecord) -> Tuple[List[D
         if field_name == "debt_to_equity":
             value = debt_to_equity
         elif field_name in STOP_CHECKING_PRICE_RATIO_PENALTY_FIELDS:
-            value = _stop_ratio_field(record, field_name)
+            value = _stop_percent_field(record, field_name)
         else:
             value = _stop_field(record, field_name)
         if value is None:
@@ -1348,18 +1372,18 @@ def calculate_stop_checking_price_penalties(record: StockRecord) -> Tuple[List[D
 
 
 def _stop_quality_score(record: StockRecord) -> Optional[float]:
-    gross_margin = _stop_ratio_field(record, "gross_margin_ttm")
-    operating_margin = _stop_ratio_field(record, "operating_margin_ttm")
+    gross_margin = _stop_percent_field(record, "gross_margin_ttm")
+    operating_margin = _stop_percent_field(record, "operating_margin_ttm")
     free_cash_flow = _stop_field(record, "free_cash_flow")
-    roe = _stop_ratio_field(record, "roe")
+    roe = _stop_percent_field(record, "roe")
     debt_to_equity = _debt_to_equity_normalized(record)
     sector_aware = _is_sector_aware_debt_sector(record)
     debt_good, debt_bad = (1.0, 5.0) if sector_aware else (0.50, 2.50)
     scores = {
-        "gross_margin_score": score_high_better(gross_margin, 0.20, 0.60),
-        "operating_margin_score": score_high_better(operating_margin, 0.00, 0.25),
+        "gross_margin_score": score_high_better(gross_margin, 20.0, 60.0),
+        "operating_margin_score": score_high_better(operating_margin, 0.0, 25.0),
         "free_cash_flow_score": score_high_better(free_cash_flow, 0.0, 1_000_000_000.0),
-        "roe_score": score_high_better(roe, 0.00, 0.20),
+        "roe_score": score_high_better(roe, 0.0, 20.0),
         "debt_control_score": score_low_better(debt_to_equity, debt_good, debt_bad),
     }
     return weighted_average_available(scores, {
@@ -1373,10 +1397,10 @@ def _stop_quality_score(record: StockRecord) -> Optional[float]:
 
 def _stop_growth_score(record: StockRecord) -> Optional[float]:
     scores = {
-        "revenue_growth_score": score_high_better(_stop_ratio_field(record, "revenue_growth_yoy"), -0.05, 0.20),
-        "eps_growth_score": score_high_better(_stop_ratio_field(record, "eps_growth_yoy"), -0.10, 0.20),
-        "fcf_growth_score": score_high_better(_stop_ratio_field(record, "fcf_growth_yoy"), -0.10, 0.20),
-        "revenue_growth_3y_cagr_score": score_high_better(_stop_ratio_field(record, "revenue_growth_3y_cagr"), 0.00, 0.20),
+        "revenue_growth_score": score_high_better(_stop_percent_field(record, "revenue_growth_yoy"), -5.0, 20.0),
+        "eps_growth_score": score_high_better(_stop_percent_field(record, "eps_growth_yoy"), -10.0, 20.0),
+        "fcf_growth_score": score_high_better(_stop_percent_field(record, "fcf_growth_yoy"), -10.0, 20.0),
+        "revenue_growth_3y_cagr_score": score_high_better(_stop_percent_field(record, "revenue_growth_3y_cagr"), 0.0, 20.0),
     }
     return weighted_average_available(scores, {
         "revenue_growth_score": 0.35,
@@ -1416,15 +1440,15 @@ def _stop_valuation_score(record: StockRecord) -> Optional[float]:
 
 
 def _stop_capital_efficiency_score(record: StockRecord) -> Optional[float]:
-    roic = _stop_ratio_field(record, "roic")
-    roe = _stop_ratio_field(record, "roe")
-    fcf_conversion = _stop_ratio_field(record, "fcf_conversion")
-    share_dilution = _stop_ratio_field(record, "shares_growth_yoy")
+    roic = _stop_percent_field(record, "roic")
+    roe = _stop_percent_field(record, "roe")
+    fcf_conversion = _stop_percent_field(record, "fcf_conversion")
+    share_dilution = _stop_percent_field(record, "shares_growth_yoy")
     scores = {
-        "roic_score": score_high_better(roic, 0.00, 0.15),
-        "roe_score": score_high_better(roe, 0.00, 0.20),
-        "fcf_conversion_score": score_high_better(fcf_conversion, 0.30, 0.90),
-        "share_dilution_score": score_low_better(share_dilution, 0.00, 0.10),
+        "roic_score": score_high_better(roic, 0.0, 15.0),
+        "roe_score": score_high_better(roe, 0.0, 20.0),
+        "fcf_conversion_score": score_high_better(fcf_conversion, 30.0, 90.0),
+        "share_dilution_score": score_low_better(share_dilution, 0.0, 10.0),
     }
     return weighted_average_available(scores, {
         "roic_score": 0.35,
@@ -1457,20 +1481,20 @@ def _stop_fundamental_score(record: StockRecord) -> Tuple[Optional[float], Dict[
 
 
 def _stop_long_term_trend_score(record: StockRecord) -> Optional[float]:
-    value = _stop_ratio_field(record, "price_vs_200dma")
+    value = _stop_percent_field(record, "price_vs_200dma")
     if value is None and record.price is not None and _get_field_value(record, "ma_200") not in (None, ""):
         ma_200 = _coerce_float(_get_field_value(record, "ma_200"))
         if ma_200 and ma_200 > 0:
-            value = (record.price / ma_200) - 1.0
+            value = ((record.price / ma_200) - 1.0) * 100.0
     if value is None:
         return None
-    if value >= 0.10:
+    if value >= 10.0:
         return 100.0
-    if value >= 0.00:
+    if value >= 0.0:
         return 80.0
-    if value >= -0.10:
+    if value >= -10.0:
         return 50.0
-    if value >= -0.20:
+    if value >= -20.0:
         return 25.0
     return 0.0
 
@@ -1483,11 +1507,11 @@ def _stop_momentum_score(record: StockRecord) -> Tuple[Optional[float], Dict[str
     persistence = _average(
         _compact(
             [
-                (score_high_better(_stop_ratio_field(record, "price_vs_sma50_pct"), -0.10, 0.20), 0.50)
-                if _stop_ratio_field(record, "price_vs_sma50_pct") is not None
+                (score_high_better(_stop_percent_field(record, "price_vs_sma50_pct"), -10.0, 20.0), 0.50)
+                if _stop_percent_field(record, "price_vs_sma50_pct") is not None
                 else None,
-                (score_high_better(_stop_ratio_field(record, "price_vs_sma200_pct"), -0.15, 0.25), 0.50)
-                if _stop_ratio_field(record, "price_vs_sma200_pct") is not None
+                (score_high_better(_stop_percent_field(record, "price_vs_sma200_pct"), -15.0, 25.0), 0.50)
+                if _stop_percent_field(record, "price_vs_sma200_pct") is not None
                 else None,
             ]
         )
@@ -1530,14 +1554,14 @@ def _stop_balance_sheet_score(record: StockRecord) -> Optional[float]:
 
 def _stop_earnings_stability_score(record: StockRecord) -> Optional[float]:
     eps_positive_years_5y = _stop_field(record, "eps_positive_years_5y")
-    operating_margin_ttm = _stop_ratio_field(record, "operating_margin_ttm")
-    revenue_growth_yoy = _stop_ratio_field(record, "revenue_growth_yoy")
-    eps_growth_yoy = _stop_ratio_field(record, "eps_growth_yoy")
+    operating_margin_ttm = _stop_percent_field(record, "operating_margin_ttm")
+    revenue_growth_yoy = _stop_percent_field(record, "revenue_growth_yoy")
+    eps_growth_yoy = _stop_percent_field(record, "eps_growth_yoy")
     scores = {
         "positive_eps_score": score_high_better(eps_positive_years_5y, 0.0, 5.0),
-        "positive_operating_margin_score": score_high_better(operating_margin_ttm, 0.00, 0.15),
-        "revenue_not_declining_score": score_high_better(revenue_growth_yoy, -0.10, 0.05),
-        "eps_not_declining_score": score_high_better(eps_growth_yoy, -0.15, 0.05),
+        "positive_operating_margin_score": score_high_better(operating_margin_ttm, 0.0, 15.0),
+        "revenue_not_declining_score": score_high_better(revenue_growth_yoy, -10.0, 5.0),
+        "eps_not_declining_score": score_high_better(eps_growth_yoy, -15.0, 5.0),
     }
     return weighted_average_available(scores, {
         "positive_eps_score": 0.30,
@@ -1548,21 +1572,21 @@ def _stop_earnings_stability_score(record: StockRecord) -> Optional[float]:
 
 
 def _stop_drawdown_score(record: StockRecord) -> Optional[float]:
-    drawdown = _stop_ratio_field(record, "max_drawdown_1y")
+    drawdown = _stop_percent_field(record, "max_drawdown_1y")
     if drawdown is None:
-        drawdown = _stop_ratio_field(record, "max_drawdown_252d")
+        drawdown = _stop_percent_field(record, "max_drawdown_252d")
     if drawdown is None:
         return None
-    return score_high_better(drawdown, -0.50, -0.15)
+    return score_high_better(drawdown, -50.0, -15.0)
 
 
 def _stop_volatility_score(record: StockRecord) -> Optional[float]:
-    volatility = _stop_ratio_field(record, "volatility_1y")
+    volatility = _stop_percent_field(record, "volatility_1y")
     if volatility is None:
-        volatility = _stop_ratio_field(record, "volatility_63d")
+        volatility = _stop_percent_field(record, "volatility_63d")
     if volatility is None:
         return None
-    return score_low_better(volatility, 0.20, 0.60)
+    return score_low_better(volatility, 20.0, 60.0)
 
 
 def _stop_liquidity_score(record: StockRecord) -> Optional[float]:
@@ -1697,36 +1721,36 @@ def assign_stop_checking_price_action(
 
 def generate_stop_checking_price_reasons(record: StockRecord, scores: Dict[str, Optional[float]], penalties: List[Dict[str, Any]], confidence_score: float) -> List[str]:
     reasons: List[str] = []
-    revenue_growth = _stop_ratio_field(record, "revenue_growth_yoy")
-    eps_growth = _stop_ratio_field(record, "eps_growth_yoy")
-    operating_margin_ttm = _stop_ratio_field(record, "operating_margin_ttm")
+    revenue_growth = _stop_percent_field(record, "revenue_growth_yoy")
+    eps_growth = _stop_percent_field(record, "eps_growth_yoy")
+    operating_margin_ttm = _stop_percent_field(record, "operating_margin_ttm")
     free_cash_flow = _stop_field(record, "free_cash_flow")
-    roe = _stop_ratio_field(record, "roe")
-    roic = _stop_ratio_field(record, "roic")
+    roe = _stop_percent_field(record, "roe")
+    roic = _stop_percent_field(record, "roic")
     debt_to_equity = _debt_to_equity_normalized(record)
-    shares_growth_yoy = _stop_ratio_field(record, "shares_growth_yoy")
-    max_drawdown_1y = _stop_ratio_field(record, "max_drawdown_1y")
-    price_vs_200dma = _stop_ratio_field(record, "price_vs_200dma")
+    shares_growth_yoy = _stop_percent_field(record, "shares_growth_yoy")
+    max_drawdown_1y = _stop_percent_field(record, "max_drawdown_1y")
+    price_vs_200dma = _stop_percent_field(record, "price_vs_200dma")
     if price_vs_200dma is None and record.price is not None and record.ma_200 not in (None, 0):
-        price_vs_200dma = record.price / record.ma_200 - 1.0
+        price_vs_200dma = ((record.price / record.ma_200) - 1.0) * 100.0
 
     if revenue_growth is not None and eps_growth is not None and revenue_growth > 0 and eps_growth > 0:
         reasons.append("營收與 EPS 維持正成長，基本面具延續性。")
-    if operating_margin_ttm is not None and operating_margin_ttm >= 0.15:
+    if operating_margin_ttm is not None and operating_margin_ttm >= 15.0:
         reasons.append("營業利益率健康，顯示公司具備獲利能力。")
     if free_cash_flow is not None and free_cash_flow > 0:
         reasons.append("自由現金流為正，獲利品質較佳。")
-    if roe is not None and roic is not None and (roe >= 0.15 or roic >= 0.12):
+    if roe is not None and roic is not None and (roe >= 15.0 or roic >= 12.0):
         reasons.append("ROE / ROIC 表現良好，資本使用效率佳。")
-    elif roic is not None and roic >= 0.12:
+    elif roic is not None and roic >= 12.0:
         reasons.append("ROIC 表現良好，資本使用效率佳。")
-    elif roe is not None and roe >= 0.15:
+    elif roe is not None and roe >= 15.0:
         reasons.append("ROE 表現良好，股東權益報酬率具支撐。")
     if debt_to_equity is not None and debt_to_equity <= 1.0:
         reasons.append("負債水準可控，資產負債表風險較低。")
-    if shares_growth_yoy is not None and shares_growth_yoy <= 0.02:
+    if shares_growth_yoy is not None and shares_growth_yoy <= 2.0:
         reasons.append("股本稀釋有限，對每股價值較友善。")
-    if max_drawdown_1y is not None and max_drawdown_1y >= -0.30:
+    if max_drawdown_1y is not None and max_drawdown_1y >= -30.0:
         reasons.append("近一年回撤相對可控。")
     if price_vs_200dma is not None and price_vs_200dma >= 0:
         reasons.append("股價未跌破長期趨勢線，長期趨勢尚未明顯轉弱。")
@@ -1742,11 +1766,11 @@ def generate_stop_checking_price_reasons(record: StockRecord, scores: Dict[str, 
 def generate_stop_checking_price_risk_warnings(record: StockRecord, confidence_score: float) -> List[str]:
     warnings: List[str] = []
     free_cash_flow = _stop_field(record, "free_cash_flow")
-    operating_margin_ttm = _stop_ratio_field(record, "operating_margin_ttm")
+    operating_margin_ttm = _stop_percent_field(record, "operating_margin_ttm")
     debt_to_equity = _debt_to_equity_normalized(record)
     sector_aware = _is_sector_aware_debt_sector(record)
-    shares_growth_yoy = _stop_ratio_field(record, "shares_growth_yoy")
-    max_drawdown_1y = _stop_ratio_field(record, "max_drawdown_1y")
+    shares_growth_yoy = _stop_percent_field(record, "shares_growth_yoy")
+    max_drawdown_1y = _stop_percent_field(record, "max_drawdown_1y")
     pe_ratio = _stop_field(record, "pe_ratio")
     ps_ratio = _stop_field(record, "ps_ratio")
     data_age_days = _record_age_days(record, "price")
@@ -1761,9 +1785,9 @@ def generate_stop_checking_price_risk_warnings(record: StockRecord, confidence_s
             warnings.append("資本結構槓桿偏高，需與同業比較。")
         elif not sector_aware and debt_to_equity > 2:
             warnings.append("負債權益比偏高，景氣下行時風險較大。")
-    if shares_growth_yoy is not None and shares_growth_yoy > 0.05:
+    if shares_growth_yoy is not None and shares_growth_yoy > 5.0:
         warnings.append("股本稀釋偏高，可能壓低每股價值。")
-    if max_drawdown_1y is not None and max_drawdown_1y < -0.40:
+    if max_drawdown_1y is not None and max_drawdown_1y < -40.0:
         warnings.append("近一年最大回撤過深，波動承受度要求較高。")
     if (pe_ratio is not None and pe_ratio > 50) or (ps_ratio is not None and ps_ratio > 20):
         warnings.append("估值偏高，需確認成長能否支撐目前價格。")
@@ -3191,6 +3215,15 @@ def screen_records(
             )
         else:
             deduped = []
+    data_limited_candidates: List[ScreenResult] = []
+    if sector_aware_enabled:
+        retained_candidates: List[ScreenResult] = []
+        for item in candidates:
+            if item.official_score_source == "legacy_missing_metadata" and item.suggested_action not in {"EXCLUDE", "AVOID"}:
+                data_limited_candidates.append(item)
+            else:
+                retained_candidates.append(item)
+        candidates = retained_candidates
     if top_n is None:
         top_n = config.top_n
     if effective_min_score is not None:
@@ -3200,6 +3233,10 @@ def screen_records(
             if item.total_score is not None and item.total_score >= effective_min_score
         ]
     displayed_candidates = candidates[:top_n]
+    for index, item in enumerate(displayed_candidates, start=1):
+        item.official_rank = index
+    for item in data_limited_candidates:
+        item.official_rank = None
     ranking_diagnostics = build_ranking_diagnostics(displayed_candidates)
     soft_penalties: List[Dict[str, Any]] = []
     missing_data_warnings: List[Dict[str, Any]] = []
@@ -3238,6 +3275,7 @@ def screen_records(
         candidates=displayed_candidates,
         excluded=excluded,
         universe_size=len(scored),
+        data_limited_candidates=data_limited_candidates,
         hard_excluded=[item for item in excluded if item.hard_exclusion is not False],
         soft_penalties=soft_penalties,
         missing_data_warnings=missing_data_warnings,
@@ -3312,6 +3350,7 @@ def _render_markdown(report: ScreeningReport) -> str:
     lines.append(f"- dedupe_company：{'啟用' if report.dedupe_company else '未啟用'}")
     lines.append(f"- 硬篩通過 {report.hard_pass_count} 檔")
     lines.append(f"- 顯示前 {len(report.candidates)} 名")
+    lines.append(f"- data_limited_candidates：{len(report.data_limited_candidates)}")
     lines.append(f"- hard_exclusion count：{len(report.hard_excluded)}")
     lines.append(f"- soft_penalty count：{len(report.soft_penalties)}")
     lines.append(f"- missing_data count：{len(report.missing_data_warnings)}")
@@ -3451,6 +3490,20 @@ def _render_markdown(report: ScreeningReport) -> str:
             action_cap = item.get("action_cap_reason") or ""
             flags = "；".join(item.get("data_quality_flags", [])) or ""
             lines.append(f"| {item['ticker']} | {missing_fields} | {action_cap} | {flags} |")
+    if report.data_limited_candidates:
+        lines.append("")
+        lines.append("## Data-limited Candidates")
+        lines.append("")
+        lines.append("| Ticker | Official source | 總分 | Legacy score | Action | 原因 |")
+        lines.append("| --- | --- | ---: | ---: | --- | --- |")
+        for item in report.data_limited_candidates:
+            lines.append(
+                f"| {item.ticker} | {item.official_score_source or ''} | "
+                f"{item.total_score if item.total_score is not None else ''} | "
+                f"{item.legacy_total_score if item.legacy_total_score is not None else ''} | "
+                f"{item.suggested_action or ''} | "
+                f"{item.action_cap_reason or '缺少 sector / industry metadata，僅列為 data-limited'} |"
+            )
     return "\n".join(lines)
 
 
@@ -3461,6 +3514,7 @@ def _render_json(report: ScreeningReport) -> str:
         "universe_size": report.universe_size,
         "hard_pass_count": report.hard_pass_count,
         "candidate_count": len(report.candidates),
+        "data_limited_candidate_count": len(report.data_limited_candidates),
         "min_score": report.min_score,
         "effective_min_score_source": report.effective_min_score_source,
         "top_n": report.top_n,
@@ -3562,8 +3616,36 @@ def _render_json(report: ScreeningReport) -> str:
                 "sector_relative_peer_count": item.sector_relative_peer_count,
                 "sector_relative_peer_reason": item.sector_relative_peer_reason,
                 "official_score_source": item.official_score_source,
+                "official_rank": item.official_rank,
             }
             for item in report.candidates
+        ],
+        "data_limited_candidates": [
+            {
+                "ticker": item.ticker,
+                "strategy_mode": item.strategy_mode,
+                "total_score": item.total_score,
+                "base_total_score": item.base_total_score,
+                "market_regime_score_delta": item.market_regime_score_delta,
+                "legacy_total_score": item.legacy_total_score,
+                "raw_score": item.raw_score,
+                "adjusted_score": item.adjusted_score,
+                "final_score": item.final_score,
+                "fundamental_score": item.fundamental_score,
+                "momentum_score": item.momentum_score,
+                "risk_safety_score": item.risk_safety_score,
+                "suggested_action": item.suggested_action,
+                "action_cap_reason": item.action_cap_reason,
+                "sector_relative_score_preview": item.sector_relative_score_preview,
+                "sector_relative_peer_source": item.sector_relative_peer_source,
+                "sector_relative_peer_count": item.sector_relative_peer_count,
+                "sector_relative_peer_reason": item.sector_relative_peer_reason,
+                "official_score_source": item.official_score_source,
+                "official_rank": item.official_rank,
+                "reasons": item.reasons,
+                "risk_warnings": item.risk_warnings,
+            }
+            for item in report.data_limited_candidates
         ],
         "hard_excluded": [
             {
@@ -3635,7 +3717,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--config", help="Optional JSON config file")
     parser.add_argument("--format", choices=("markdown", "json"), default="markdown")
     parser.add_argument("--top-n", type=int, default=20)
-    parser.add_argument("--min-score", type=float, help="Optional score floor. Defaults to unset for both modes; use this only when you want a fixed cutoff.")
+    parser.add_argument("--min-score", type=float, help="留空 = 不設最低分；僅供手動 review。")
     parser.add_argument("--as-of", dest="as_of", help="Optional YYYY-MM-DD date")
     parser.add_argument("--strategy-mode", choices=sorted(VALID_STRATEGY_MODES), default=DEFAULT_STRATEGY_MODE)
     parser.add_argument("--force-rebalance", action="store_true")

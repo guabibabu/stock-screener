@@ -164,6 +164,7 @@ Each result can include:
 ### Stop-Mode Score Floor
 
 - The default `min_score` is unset.
+- Leave it blank = no minimum score; manual review only.
 - Use `--min-score` only when you explicitly want a fixed score cutoff.
 - This keeps stop mode useful as a manual review list instead of hiding candidates during weak or incomplete-data market snapshots.
 
@@ -378,12 +379,14 @@ Phase 2C.5 diagnostics:
 
 Phase 2C.6 peer provenance diagnostics:
 
-- `sector_relative_peer_source`: `sector`, `universe_fallback`, `missing_sector`, or `missing_record`.
+- `sector_relative_peer_source`: `industry`, `sector`, `universe_insufficient_peers`, `universe_missing_metadata`, or `not_scored_sector_aware_disabled`.
 - `sector_relative_peer_count`: number of records used for the percentile comparison. Universe fallback uses the full displayed candidate universe count.
 - `sector_aware_sector_peer_used_count`: candidates whose preview used same-sector peers.
-- `sector_aware_universe_fallback_count`: candidates with a sector, but too few same-sector peers, so preview fell back to the universe.
-- `sector_aware_missing_sector_count`: candidates with missing sector metadata.
+- `sector_aware_universe_fallback_count`: candidates with industry and sector metadata, but too few peers, so preview fell back to the universe.
+- `sector_aware_missing_sector_count`: preview-only count of candidates missing sector or industry metadata.
 - `sector_aware_average_peer_count`, `sector_aware_min_peer_count`, and `sector_aware_max_peer_count`: peer-count distribution for available preview scores.
+
+When `sector_aware_status = enabled`, names with `official_score_source = legacy_missing_metadata` stay on the legacy factor path, can still receive market-regime overlay on that legacy path, but do not enter the official ranked pool. They are shown separately as `data_limited_candidates`.
 
 Official sector-aware factors:
 

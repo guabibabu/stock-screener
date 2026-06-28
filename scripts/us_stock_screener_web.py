@@ -191,6 +191,7 @@ def _result_to_payload(item: Any) -> Dict[str, Any]:
         "sector_relative_peer_count": item.sector_relative_peer_count,
         "sector_relative_peer_reason": item.sector_relative_peer_reason,
         "official_score_source": item.official_score_source,
+        "official_rank": item.official_rank,
     }
 
 
@@ -202,6 +203,7 @@ def _report_to_payload(report: Any, *, source_name: str, bundle: Any = None) -> 
         "universe_size": report.universe_size,
         "hard_pass_count": report.hard_pass_count,
         "candidate_count": len(report.candidates),
+        "data_limited_candidate_count": len(report.data_limited_candidates),
         "excluded_count": len(report.excluded),
         "hard_excluded_count": len(report.hard_excluded),
         "soft_penalty_count": len(report.soft_penalties),
@@ -275,6 +277,7 @@ def _report_to_payload(report: Any, *, source_name: str, bundle: Any = None) -> 
         },
         "candidates": [_result_to_payload(item) for item in report.candidates],
         "hard_excluded": [_result_to_payload(item) for item in report.hard_excluded],
+        "data_limited_candidates": [_result_to_payload(item) for item in report.data_limited_candidates],
         "soft_penalties": report.soft_penalties,
         "missing_data_warnings": report.missing_data_warnings,
     }
@@ -478,7 +481,7 @@ INDEX_HTML = r"""<!doctype html>
         <label class="check"><input id="forceRebalance" type="checkbox" /> 強制季度檢查</label>
 
         <label>自訂最低分數，可留空</label>
-        <input id="minScore" type="number" min="0" max="100" step="0.1" placeholder="Hybrid 留空；Stop 預設 85" />
+        <input id="minScore" type="number" min="0" max="100" step="0.1" placeholder="留空 = 不設最低分；僅供手動 review" />
 
         <button id="runBtn" class="button primary">更新並篩選</button>
         <button id="sampleBtn" class="button secondary">只看離線示範資料</button>

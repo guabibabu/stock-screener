@@ -24,6 +24,7 @@ RESEARCH_FLAGS = {
     "survivorship_bias_possible": True,
     "not_for_automated_trading": True,
     "missing_return_policy": "invalidate_portfolio_period",
+    "allow_unverified_historical": False,
 }
 TOP_20 = "top_20"
 TOP_50 = "top_50"
@@ -39,6 +40,7 @@ class HistoricalSnapshot:
     payload: Dict[str, Any]
     records: List[Any]
     market_context: Optional[Dict[str, Any]]
+    point_in_time_verified: bool
 
 
 @dataclass
@@ -55,8 +57,11 @@ class PortfolioPeriod:
     top_10_weight: Optional[float]
     sector_exposure: Dict[str, float]
     missing_return_tickers: List[str] = field(default_factory=list)
+    period_status: str = "valid"
     benchmark_missing_reason: Optional[str] = None
     universe_benchmark_eligible_count: int = 0
+    benchmark_spy_status: str = "valid"
+    benchmark_universe_status: str = "valid"
     holding_returns: Dict[str, float] = field(default_factory=dict)
 
 
@@ -71,7 +76,12 @@ class BacktestSummary:
     missing_return_ticker_count: int
     missing_return_tickers: List[str]
     total_formations: int
+    expected_period_count: int
     valid_period_count: int
+    invalid_period_count: int
+    no_candidate_period_count: int
+    coverage_ratio: float
+    metric_status: str
     cagr: Optional[float]
     annualized_volatility: Optional[float]
     sharpe_ratio: Optional[float]
@@ -83,15 +93,25 @@ class BacktestSummary:
     average_holding_period: Optional[float]
     average_sector_exposure: Dict[str, float]
     average_top_holdings_concentration: Optional[float]
+    benchmark_spy_expected_period_count: int
+    benchmark_spy_valid_period_count: int
+    benchmark_spy_coverage_ratio: float
+    benchmark_spy_metric_status: str
     benchmark_spy_cagr: Optional[float]
     benchmark_spy_annualized_volatility: Optional[float]
     benchmark_spy_sharpe_ratio: Optional[float]
     benchmark_spy_sortino_ratio: Optional[float]
+    benchmark_spy_sortino_reason: str
     benchmark_spy_max_drawdown: Optional[float]
+    benchmark_universe_expected_period_count: int
+    benchmark_universe_valid_period_count: int
+    benchmark_universe_coverage_ratio: float
+    benchmark_universe_metric_status: str
     benchmark_universe_cagr: Optional[float]
     benchmark_universe_annualized_volatility: Optional[float]
     benchmark_universe_sharpe_ratio: Optional[float]
     benchmark_universe_sortino_ratio: Optional[float]
+    benchmark_universe_sortino_reason: str
     benchmark_universe_max_drawdown: Optional[float]
 
 
@@ -136,19 +156,29 @@ def _extract_snapshot_payload(path: Path) -> Dict[str, Any]:
 def _validate_snapshot_date(path: Path, payload: Dict[str, Any]) -> date:
     filename_date = date.fromisoformat(path.stem)
     metadata = payload.get("metadata")
-    if isinstance(metadata, dict) and metadata.get("as_of"):
-        payload_date = date.fromisoformat(str(metadata["as_of"]))
-        if payload_date != filename_date:
-            raise ValueError(
-                f"Snapshot {path.name} has metadata.as_of={payload_date.isoformat()} "
-                f"which does not match filename date {filename_date.isoformat()}"
-            )
+    if isinstance(metadata, dict):
+        if metadata.get("as_of"):
+            payload_date = date.fromisoformat(str(metadata["as_of"]))
+            if payload_date != filename_date:
+                raise ValueError(
+                    f"Snapshot {path.name} has metadata.as_of={payload_date.isoformat()} "
+                    f"which does not match filename date {filename_date.isoformat()}"
+                )
+        if metadata.get("requested_as_of"):
+            requested_date = date.fromisoformat(str(metadata["requested_as_of"]))
+            if requested_date != filename_date:
+                raise ValueError(
+                    f"Snapshot {path.name} has metadata.requested_as_of={requested_date.isoformat()} "
+                    f"which does not match filename date {filename_date.isoformat()}"
+                )
     return filename_date
 
 
 def load_historical_snapshots(
     snapshots_dir: Path,
     market_context_dir: Optional[Path] = None,
+    *,
+    allow_unverified_historical: bool = False,
 ) -> List[HistoricalSnapshot]:
     if not snapshots_dir.exists():
         raise FileNotFoundError(snapshots_dir)
@@ -158,6 +188,12 @@ def load_historical_snapshots(
             continue
         payload = _extract_snapshot_payload(path)
         as_of = _validate_snapshot_date(path, payload)
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        point_in_time_verified = bool(metadata.get("point_in_time_verified") is True)
+        if not point_in_time_verified and not allow_unverified_historical:
+            raise ValueError(
+                f"Snapshot {path.name} is not point-in-time verified; rerun with --allow-unverified-historical to proceed"
+            )
         records = load_records(path)
         market_context = None
         if market_context_dir is not None:
@@ -171,6 +207,7 @@ def load_historical_snapshots(
                 payload=payload,
                 records=records,
                 market_context=market_context,
+                point_in_time_verified=point_in_time_verified,
             )
         )
     if not snapshots:
@@ -381,13 +418,11 @@ def _sharpe(period_returns: Sequence[float], annualization_factor: int) -> Optio
 
 
 def _sortino(period_returns: Sequence[float], annualization_factor: int) -> Optional[float]:
-    downside = [value for value in period_returns if value < 0]
-    if not period_returns or not downside:
+    downside = [min(0.0, value) for value in period_returns]
+    negative_periods = [value for value in period_returns if value < 0]
+    if not period_returns or not negative_periods:
         return None
-    if len(downside) == 1:
-        downside_deviation = abs(downside[0])
-    else:
-        downside_deviation = stdev(downside)
+    downside_deviation = math.sqrt(sum(value * value for value in downside) / len(downside))
     if downside_deviation == 0:
         return None
     return mean(period_returns) / downside_deviation * math.sqrt(annualization_factor)
@@ -398,6 +433,16 @@ def _sortino_reason(period_returns: Sequence[float]) -> str:
     if not period_returns or not downside:
         return "no_negative_return_periods"
     return ""
+
+
+def _coverage_ratio(valid_count: int, expected_count: int) -> float:
+    if expected_count <= 0:
+        return 0.0
+    return valid_count / expected_count
+
+
+def _metric_status(valid_count: int, expected_count: int) -> str:
+    return "incomplete_coverage" if _coverage_ratio(valid_count, expected_count) < 0.90 else "ok"
 
 
 def _max_drawdown(period_returns: Sequence[float]) -> Optional[float]:
@@ -452,6 +497,7 @@ def _summarize_periods(
     periods: Sequence[PortfolioPeriod],
 ) -> BacktestSummary:
     annualization_factor = 12 if strategy_mode == "hybrid" else 4
+    expected_period_count = len(periods)
     valid_periods = [period for period in periods if period.return_value is not None]
     valid_returns = [period.return_value for period in valid_periods if period.return_value is not None]
     spy_valid = [period.benchmark_spy_return for period in periods if period.benchmark_spy_return is not None]
@@ -466,6 +512,13 @@ def _summarize_periods(
             if value > 0:
                 positive_holding_returns += 1
     concentration_values = [period.top_10_weight for period in periods if period.top_10_weight is not None]
+    portfolio_metric_status = _metric_status(len(valid_periods), expected_period_count)
+    benchmark_spy_expected_period_count = expected_period_count
+    benchmark_spy_valid_period_count = len(spy_valid)
+    benchmark_spy_metric_status = _metric_status(benchmark_spy_valid_period_count, benchmark_spy_expected_period_count)
+    benchmark_universe_expected_period_count = expected_period_count
+    benchmark_universe_valid_period_count = len(universe_valid)
+    benchmark_universe_metric_status = _metric_status(benchmark_universe_valid_period_count, benchmark_universe_expected_period_count)
     return BacktestSummary(
         strategy_mode=strategy_mode,
         portfolio_name=portfolio_name,
@@ -476,28 +529,43 @@ def _summarize_periods(
         missing_return_ticker_count=len(missing_tickers),
         missing_return_tickers=missing_tickers,
         total_formations=len(periods),
+        expected_period_count=expected_period_count,
         valid_period_count=len(valid_periods),
-        cagr=_cagr(valid_returns, annualization_factor),
+        invalid_period_count=expected_period_count - len(valid_periods),
+        no_candidate_period_count=sum(1 for period in periods if period.period_status == "no_candidates"),
+        coverage_ratio=_coverage_ratio(len(valid_periods), expected_period_count),
+        metric_status=portfolio_metric_status,
+        cagr=None if portfolio_metric_status == "incomplete_coverage" else _cagr(valid_returns, annualization_factor),
         annualized_volatility=_annualized_volatility(valid_returns, annualization_factor),
-        sharpe_ratio=_sharpe(valid_returns, annualization_factor),
-        sortino_ratio=_sortino(valid_returns, annualization_factor),
-        sortino_reason=_sortino_reason(valid_returns),
-        max_drawdown=_max_drawdown(valid_returns),
+        sharpe_ratio=None if portfolio_metric_status == "incomplete_coverage" else _sharpe(valid_returns, annualization_factor),
+        sortino_ratio=None if portfolio_metric_status == "incomplete_coverage" else _sortino(valid_returns, annualization_factor),
+        sortino_reason=("incomplete_coverage" if portfolio_metric_status == "incomplete_coverage" else _sortino_reason(valid_returns)),
+        max_drawdown=None if portfolio_metric_status == "incomplete_coverage" else _max_drawdown(valid_returns),
         average_turnover=mean(turnover_values) if turnover_values else None,
         hit_rate=(positive_holding_returns / total_holding_returns) if total_holding_returns else None,
         average_holding_period=_average_holding_period(periods),
         average_sector_exposure=_average_sector_exposure(periods),
         average_top_holdings_concentration=(mean(concentration_values) if concentration_values else None),
-        benchmark_spy_cagr=_cagr(spy_valid, annualization_factor),
+        benchmark_spy_expected_period_count=benchmark_spy_expected_period_count,
+        benchmark_spy_valid_period_count=benchmark_spy_valid_period_count,
+        benchmark_spy_coverage_ratio=_coverage_ratio(benchmark_spy_valid_period_count, benchmark_spy_expected_period_count),
+        benchmark_spy_metric_status=benchmark_spy_metric_status,
+        benchmark_spy_cagr=None if benchmark_spy_metric_status == "incomplete_coverage" else _cagr(spy_valid, annualization_factor),
         benchmark_spy_annualized_volatility=_annualized_volatility(spy_valid, annualization_factor),
-        benchmark_spy_sharpe_ratio=_sharpe(spy_valid, annualization_factor),
-        benchmark_spy_sortino_ratio=_sortino(spy_valid, annualization_factor),
-        benchmark_spy_max_drawdown=_max_drawdown(spy_valid),
-        benchmark_universe_cagr=_cagr(universe_valid, annualization_factor),
+        benchmark_spy_sharpe_ratio=None if benchmark_spy_metric_status == "incomplete_coverage" else _sharpe(spy_valid, annualization_factor),
+        benchmark_spy_sortino_ratio=None if benchmark_spy_metric_status == "incomplete_coverage" else _sortino(spy_valid, annualization_factor),
+        benchmark_spy_sortino_reason=("incomplete_coverage" if benchmark_spy_metric_status == "incomplete_coverage" else _sortino_reason(spy_valid)),
+        benchmark_spy_max_drawdown=None if benchmark_spy_metric_status == "incomplete_coverage" else _max_drawdown(spy_valid),
+        benchmark_universe_expected_period_count=benchmark_universe_expected_period_count,
+        benchmark_universe_valid_period_count=benchmark_universe_valid_period_count,
+        benchmark_universe_coverage_ratio=_coverage_ratio(benchmark_universe_valid_period_count, benchmark_universe_expected_period_count),
+        benchmark_universe_metric_status=benchmark_universe_metric_status,
+        benchmark_universe_cagr=None if benchmark_universe_metric_status == "incomplete_coverage" else _cagr(universe_valid, annualization_factor),
         benchmark_universe_annualized_volatility=_annualized_volatility(universe_valid, annualization_factor),
-        benchmark_universe_sharpe_ratio=_sharpe(universe_valid, annualization_factor),
-        benchmark_universe_sortino_ratio=_sortino(universe_valid, annualization_factor),
-        benchmark_universe_max_drawdown=_max_drawdown(universe_valid),
+        benchmark_universe_sharpe_ratio=None if benchmark_universe_metric_status == "incomplete_coverage" else _sharpe(universe_valid, annualization_factor),
+        benchmark_universe_sortino_ratio=None if benchmark_universe_metric_status == "incomplete_coverage" else _sortino(universe_valid, annualization_factor),
+        benchmark_universe_sortino_reason=("incomplete_coverage" if benchmark_universe_metric_status == "incomplete_coverage" else _sortino_reason(universe_valid)),
+        benchmark_universe_max_drawdown=None if benchmark_universe_metric_status == "incomplete_coverage" else _max_drawdown(universe_valid),
     )
 
 
@@ -520,8 +588,6 @@ def run_backtest(
         report = _formation_report(formation, strategy_mode, config, min_score)
         official_candidates = list(report.candidates)
         candidate_count = len(official_candidates)
-        if candidate_count == 0:
-            continue
         formation_prices = _price_map(formation.records)
         next_prices = _price_map(next_snapshot.records)
         formation_record_map = _record_map(formation.records)
@@ -531,11 +597,14 @@ def run_backtest(
 
         for portfolio_name, requested_size in _configured_portfolios(strategy_mode, candidate_count):
             holding_count = min(requested_size, candidate_count)
-            if holding_count <= 0:
-                continue
-            holdings = [item.ticker for item in official_candidates[:holding_count]]
+            holdings = [item.ticker for item in official_candidates[:holding_count]] if holding_count > 0 else []
             weights = _equal_weight_map(holdings)
             return_value, missing_tickers, holding_returns = _portfolio_return(holdings, formation_prices, next_prices)
+            period_status = "valid"
+            if holding_count <= 0:
+                period_status = "no_candidates"
+            elif return_value is None:
+                period_status = "missing_next_period_price"
             period = PortfolioPeriod(
                 formation_date=formation.as_of,
                 next_date=next_snapshot.as_of,
@@ -549,8 +618,11 @@ def run_backtest(
                 top_10_weight=_top_10_weight(len(holdings)),
                 sector_exposure=_sector_exposure(formation_record_map, holdings),
                 missing_return_tickers=missing_tickers,
+                period_status=period_status,
                 benchmark_missing_reason=spy_reason,
                 universe_benchmark_eligible_count=universe_eligible_count,
+                benchmark_spy_status="valid" if spy_return is not None else (spy_reason or "missing_spy_price"),
+                benchmark_universe_status="valid" if universe_return is not None else "missing_next_period_price",
                 holding_returns=holding_returns,
             )
             periods_by_portfolio.setdefault(portfolio_name, []).append(period)
@@ -566,6 +638,15 @@ def _serialize_flags() -> Dict[str, Any]:
     return dict(RESEARCH_FLAGS)
 
 
+def _metric_text(value: Optional[float], status: str) -> str:
+    if status == "incomplete_coverage":
+        return "INCOMPLETE"
+    if value is None:
+        return "N/A"
+    rounded = _safe_round(value)
+    return str(rounded)
+
+
 def _summary_rows(summaries: Sequence[BacktestSummary]) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     flags = _serialize_flags()
@@ -576,31 +657,58 @@ def _summary_rows(summaries: Sequence[BacktestSummary]) -> List[Dict[str, Any]]:
             "rebalance_frequency": summary.rebalance_frequency,
             "annualization_factor": summary.annualization_factor,
             "total_formations": summary.total_formations,
+            "expected_period_count": summary.expected_period_count,
             "valid_period_count": summary.valid_period_count,
+            "invalid_period_count": summary.invalid_period_count,
+            "no_candidate_period_count": summary.no_candidate_period_count,
+            "coverage_ratio": _safe_round(summary.coverage_ratio),
+            "metric_status": summary.metric_status,
             "missing_return_period_count": summary.missing_return_period_count,
             "missing_return_ticker_count": summary.missing_return_ticker_count,
             "missing_return_tickers": json.dumps(summary.missing_return_tickers, ensure_ascii=False),
-            "cagr": _safe_round(summary.cagr),
+            "cagr": _metric_text(summary.cagr, summary.metric_status),
             "annualized_volatility": _safe_round(summary.annualized_volatility),
-            "sharpe_ratio": _safe_round(summary.sharpe_ratio),
-            "sortino_ratio": (_safe_round(summary.sortino_ratio) if summary.sortino_ratio is not None else "N/A"),
+            "sharpe_ratio": _metric_text(summary.sharpe_ratio, summary.metric_status),
+            "sortino_ratio": (
+                "INCOMPLETE"
+                if summary.sortino_reason == "incomplete_coverage"
+                else (_safe_round(summary.sortino_ratio) if summary.sortino_ratio is not None else "N/A")
+            ),
             "sortino_reason": summary.sortino_reason,
-            "max_drawdown": _safe_round(summary.max_drawdown),
+            "max_drawdown": _metric_text(summary.max_drawdown, summary.metric_status),
             "average_turnover": _safe_round(summary.average_turnover),
             "hit_rate": _safe_round(summary.hit_rate),
             "average_holding_period": _safe_round(summary.average_holding_period),
             "sector_exposure": json.dumps(summary.average_sector_exposure, ensure_ascii=False, sort_keys=True),
             "top_holdings_concentration": _safe_round(summary.average_top_holdings_concentration),
-            "benchmark_spy_cagr": _safe_round(summary.benchmark_spy_cagr),
+            "benchmark_spy_expected_period_count": summary.benchmark_spy_expected_period_count,
+            "benchmark_spy_valid_period_count": summary.benchmark_spy_valid_period_count,
+            "benchmark_spy_coverage_ratio": _safe_round(summary.benchmark_spy_coverage_ratio),
+            "benchmark_spy_metric_status": summary.benchmark_spy_metric_status,
+            "benchmark_spy_cagr": _metric_text(summary.benchmark_spy_cagr, summary.benchmark_spy_metric_status),
             "benchmark_spy_annualized_volatility": _safe_round(summary.benchmark_spy_annualized_volatility),
-            "benchmark_spy_sharpe_ratio": _safe_round(summary.benchmark_spy_sharpe_ratio),
-            "benchmark_spy_sortino_ratio": _safe_round(summary.benchmark_spy_sortino_ratio),
-            "benchmark_spy_max_drawdown": _safe_round(summary.benchmark_spy_max_drawdown),
-            "benchmark_universe_cagr": _safe_round(summary.benchmark_universe_cagr),
+            "benchmark_spy_sharpe_ratio": _metric_text(summary.benchmark_spy_sharpe_ratio, summary.benchmark_spy_metric_status),
+            "benchmark_spy_sortino_ratio": (
+                "INCOMPLETE"
+                if summary.benchmark_spy_sortino_reason == "incomplete_coverage"
+                else (_safe_round(summary.benchmark_spy_sortino_ratio) if summary.benchmark_spy_sortino_ratio is not None else "N/A")
+            ),
+            "benchmark_spy_sortino_reason": summary.benchmark_spy_sortino_reason,
+            "benchmark_spy_max_drawdown": _metric_text(summary.benchmark_spy_max_drawdown, summary.benchmark_spy_metric_status),
+            "benchmark_universe_expected_period_count": summary.benchmark_universe_expected_period_count,
+            "benchmark_universe_valid_period_count": summary.benchmark_universe_valid_period_count,
+            "benchmark_universe_coverage_ratio": _safe_round(summary.benchmark_universe_coverage_ratio),
+            "benchmark_universe_metric_status": summary.benchmark_universe_metric_status,
+            "benchmark_universe_cagr": _metric_text(summary.benchmark_universe_cagr, summary.benchmark_universe_metric_status),
             "benchmark_universe_annualized_volatility": _safe_round(summary.benchmark_universe_annualized_volatility),
-            "benchmark_universe_sharpe_ratio": _safe_round(summary.benchmark_universe_sharpe_ratio),
-            "benchmark_universe_sortino_ratio": _safe_round(summary.benchmark_universe_sortino_ratio),
-            "benchmark_universe_max_drawdown": _safe_round(summary.benchmark_universe_max_drawdown),
+            "benchmark_universe_sharpe_ratio": _metric_text(summary.benchmark_universe_sharpe_ratio, summary.benchmark_universe_metric_status),
+            "benchmark_universe_sortino_ratio": (
+                "INCOMPLETE"
+                if summary.benchmark_universe_sortino_reason == "incomplete_coverage"
+                else (_safe_round(summary.benchmark_universe_sortino_ratio) if summary.benchmark_universe_sortino_ratio is not None else "N/A")
+            ),
+            "benchmark_universe_sortino_reason": summary.benchmark_universe_sortino_reason,
+            "benchmark_universe_max_drawdown": _metric_text(summary.benchmark_universe_max_drawdown, summary.benchmark_universe_metric_status),
         }
         row.update(flags)
         rows.append(row)
@@ -620,8 +728,11 @@ def _period_rows(summaries: Sequence[BacktestSummary]) -> List[Dict[str, Any]]:
                 "holding_count": period.holding_count,
                 "holdings": json.dumps(period.holdings, ensure_ascii=False),
                 "portfolio_return": _safe_round(period.return_value),
+                "period_status": period.period_status,
                 "benchmark_spy_return": _safe_round(period.benchmark_spy_return),
+                "benchmark_spy_status": period.benchmark_spy_status,
                 "benchmark_universe_return": _safe_round(period.benchmark_universe_return),
+                "benchmark_universe_status": period.benchmark_universe_status,
                 "turnover": _safe_round(period.turnover),
                 "top_10_weight": _safe_round(period.top_10_weight),
                 "sector_exposure": json.dumps(period.sector_exposure, ensure_ascii=False, sort_keys=True),
@@ -665,23 +776,40 @@ def render_markdown_report(
         lines.append(f"- rebalance_frequency: {summary.rebalance_frequency}")
         lines.append(f"- annualization_factor: {summary.annualization_factor}")
         lines.append(f"- total_formations: {summary.total_formations}")
+        lines.append(f"- expected_period_count: {summary.expected_period_count}")
         lines.append(f"- valid_period_count: {summary.valid_period_count}")
+        lines.append(f"- invalid_period_count: {summary.invalid_period_count}")
+        lines.append(f"- no_candidate_period_count: {summary.no_candidate_period_count}")
+        lines.append(f"- coverage_ratio: {_safe_round(summary.coverage_ratio)}")
+        lines.append(f"- metric_status: {summary.metric_status}")
         lines.append(f"- missing_return_period_count: {summary.missing_return_period_count}")
         lines.append(f"- missing_return_ticker_count: {summary.missing_return_ticker_count}")
         lines.append(f"- missing_return_tickers: {', '.join(summary.missing_return_tickers) if summary.missing_return_tickers else 'none'}")
-        lines.append(f"- CAGR: {_safe_round(summary.cagr)}")
+        lines.append(f"- CAGR: {_metric_text(summary.cagr, summary.metric_status)}")
         lines.append(f"- annualized_volatility: {_safe_round(summary.annualized_volatility)}")
-        lines.append(f"- Sharpe: {_safe_round(summary.sharpe_ratio)}")
-        lines.append(f"- Sortino: {_safe_round(summary.sortino_ratio) if summary.sortino_ratio is not None else 'N/A'}")
+        lines.append(f"- Sharpe: {_metric_text(summary.sharpe_ratio, summary.metric_status)}")
+        lines.append(f"- Sortino: {'INCOMPLETE' if summary.sortino_reason == 'incomplete_coverage' else (_safe_round(summary.sortino_ratio) if summary.sortino_ratio is not None else 'N/A')}")
         lines.append(f"- Sortino reason: {summary.sortino_reason.replace('_', ' ') if summary.sortino_reason else ''}")
-        lines.append(f"- max_drawdown: {_safe_round(summary.max_drawdown)}")
+        lines.append(f"- max_drawdown: {_metric_text(summary.max_drawdown, summary.metric_status)}")
         lines.append(f"- average_turnover: {_safe_round(summary.average_turnover)}")
         lines.append(f"- hit_rate: {_safe_round(summary.hit_rate)}")
         lines.append(f"- average_holding_period: {_safe_round(summary.average_holding_period)}")
         lines.append(f"- sector_exposure: `{json.dumps(summary.average_sector_exposure, ensure_ascii=False, sort_keys=True)}`")
         lines.append(f"- top_holdings_concentration: {_safe_round(summary.average_top_holdings_concentration)}")
-        lines.append(f"- benchmark_spy_cagr: {_safe_round(summary.benchmark_spy_cagr)}")
-        lines.append(f"- benchmark_universe_cagr: {_safe_round(summary.benchmark_universe_cagr)}")
+        lines.append(f"- benchmark_spy_expected_period_count: {summary.benchmark_spy_expected_period_count}")
+        lines.append(f"- benchmark_spy_valid_period_count: {summary.benchmark_spy_valid_period_count}")
+        lines.append(f"- benchmark_spy_coverage_ratio: {_safe_round(summary.benchmark_spy_coverage_ratio)}")
+        lines.append(f"- benchmark_spy_metric_status: {summary.benchmark_spy_metric_status}")
+        lines.append(f"- benchmark_spy_cagr: {_metric_text(summary.benchmark_spy_cagr, summary.benchmark_spy_metric_status)}")
+        lines.append(f"- benchmark_spy_sortino: {'INCOMPLETE' if summary.benchmark_spy_sortino_reason == 'incomplete_coverage' else (_safe_round(summary.benchmark_spy_sortino_ratio) if summary.benchmark_spy_sortino_ratio is not None else 'N/A')}")
+        lines.append(f"- benchmark_spy_sortino_reason: {summary.benchmark_spy_sortino_reason.replace('_', ' ') if summary.benchmark_spy_sortino_reason else ''}")
+        lines.append(f"- benchmark_universe_expected_period_count: {summary.benchmark_universe_expected_period_count}")
+        lines.append(f"- benchmark_universe_valid_period_count: {summary.benchmark_universe_valid_period_count}")
+        lines.append(f"- benchmark_universe_coverage_ratio: {_safe_round(summary.benchmark_universe_coverage_ratio)}")
+        lines.append(f"- benchmark_universe_metric_status: {summary.benchmark_universe_metric_status}")
+        lines.append(f"- benchmark_universe_cagr: {_metric_text(summary.benchmark_universe_cagr, summary.benchmark_universe_metric_status)}")
+        lines.append(f"- benchmark_universe_sortino: {'INCOMPLETE' if summary.benchmark_universe_sortino_reason == 'incomplete_coverage' else (_safe_round(summary.benchmark_universe_sortino_ratio) if summary.benchmark_universe_sortino_ratio is not None else 'N/A')}")
+        lines.append(f"- benchmark_universe_sortino_reason: {summary.benchmark_universe_sortino_reason.replace('_', ' ') if summary.benchmark_universe_sortino_reason else ''}")
         lines.append("")
     return "\n".join(lines) + "\n"
 
@@ -709,6 +837,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--market-context-dir", help="Optional local directory containing YYYY-MM-DD.market-context.json files")
     parser.add_argument("--config", help="Optional screener config JSON")
     parser.add_argument("--min-score", type=float, help="Optional minimum score applied during ranking")
+    parser.add_argument("--allow-unverified-historical", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -717,23 +846,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     snapshots_dir = Path(args.snapshots_dir)
     market_context_dir = Path(args.market_context_dir) if args.market_context_dir else None
     config = _load_config(Path(args.config) if args.config else None)
-    snapshots = load_historical_snapshots(snapshots_dir, market_context_dir=market_context_dir)
-    spy_prices = load_spy_prices(Path(args.spy_prices) if args.spy_prices else None, snapshots)
-    summaries = run_backtest(
-        snapshots,
-        args.strategy_mode,
-        config=config,
-        min_score=args.min_score,
-        spy_prices=spy_prices,
-    )
-    output_prefix = Path(args.output_prefix)
-    write_csv(output_prefix.with_suffix(".summary.csv"), _summary_rows(summaries))
-    write_csv(output_prefix.with_suffix(".periods.csv"), _period_rows(summaries))
-    write_markdown(
-        output_prefix.with_suffix(".md"),
-        render_markdown_report(summaries, args.strategy_mode, snapshots),
-    )
-    return 0
+    previous_allow_unverified = RESEARCH_FLAGS["allow_unverified_historical"]
+    RESEARCH_FLAGS["allow_unverified_historical"] = bool(args.allow_unverified_historical)
+    try:
+        snapshots = load_historical_snapshots(
+            snapshots_dir,
+            market_context_dir=market_context_dir,
+            allow_unverified_historical=bool(args.allow_unverified_historical),
+        )
+        spy_prices = load_spy_prices(Path(args.spy_prices) if args.spy_prices else None, snapshots)
+        summaries = run_backtest(
+            snapshots,
+            args.strategy_mode,
+            config=config,
+            min_score=args.min_score,
+            spy_prices=spy_prices,
+        )
+        output_prefix = Path(args.output_prefix)
+        write_csv(output_prefix.with_suffix(".summary.csv"), _summary_rows(summaries))
+        write_csv(output_prefix.with_suffix(".periods.csv"), _period_rows(summaries))
+        write_markdown(
+            output_prefix.with_suffix(".md"),
+            render_markdown_report(summaries, args.strategy_mode, snapshots),
+        )
+        return 0
+    finally:
+        RESEARCH_FLAGS["allow_unverified_historical"] = previous_allow_unverified
 
 
 if __name__ == "__main__":

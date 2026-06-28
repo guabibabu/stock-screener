@@ -63,6 +63,7 @@ Fixed rules:
 
 - The filename date is the only official backtest date source.
 - If `metadata.as_of` is present, it must exactly match the filename date.
+- If `metadata.requested_as_of` is present, it must exactly match the filename date.
 - Backtests must not call yfinance or any other network source.
 - Backtests must not backfill earlier snapshots with fields only known from later snapshots.
 
@@ -72,6 +73,10 @@ Minimum structure:
 {
   "metadata": {
     "as_of": "2026-01-31",
+    "requested_as_of": "2026-01-31",
+    "fetched_at": "2026-06-28T00:00:00Z",
+    "source_data_end_date": "2026-01-31",
+    "point_in_time_verified": true,
     "benchmarks": {
       "SPY": 610.25
     }
@@ -212,6 +217,7 @@ Each candidate can include:
 - `sector_relative_notes`
 - `sector_relative_peer_source`
 - `sector_relative_peer_count`
+- `official_rank`
 - `legacy_total_score`
 - `legacy_raw_score`
 - `legacy_adjusted_score`
@@ -232,6 +238,8 @@ Official scoring provenance is separate from preview peer provenance:
 - `official_score_source = sector_aware`
 - `official_score_source = legacy_metadata_gate`
 - `official_score_source = legacy_missing_metadata`
+
+When `sector_aware_status = enabled` and a stock falls back to `official_score_source = legacy_missing_metadata`, it does not enter the official ranked candidate pool. Those names appear separately as `data_limited_candidates`, with `official_rank = null`.
 
 `sector_relative_peer_count` is the number of records used for the percentile comparison. In universe fallback cases, this is the full candidate universe count.
 

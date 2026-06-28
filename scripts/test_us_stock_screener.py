@@ -178,6 +178,10 @@ class ScreenerTests(unittest.TestCase):
         payload = {
             "metadata": {
                 "as_of": as_of,
+                "requested_as_of": as_of,
+                "fetched_at": "2026-06-28T00:00:00Z",
+                "source_data_end_date": as_of,
+                "point_in_time_verified": True,
                 "benchmarks": benchmarks or {},
             },
             "records": records,
@@ -247,6 +251,55 @@ class ScreenerTests(unittest.TestCase):
         self.assertTrue(raw["metadata_fetch_failed"])
         self.assertFalse(raw["metadata_missing"])
         self.assertEqual(bundle.metadata_fetch_failed_count, 1)
+
+    def test_snapshot_metadata_includes_requested_as_of_source_data_end_date_and_unverified_flag(self) -> None:
+        provider = FakeProvider(
+            {
+                "META": {
+                    "info": {
+                        "sector": "Technology",
+                        "industry": "Software",
+                        "regularMarketPrice": 100,
+                        "marketCap": 100_000_000_000,
+                        "quoteType": "EQUITY",
+                    },
+                    "history": [
+                        {"Date": "2026-06-26", "Close": 100, "Volume": 1_000_000},
+                        {"Date": "2026-06-27", "Close": 101, "Volume": 1_100_000},
+                    ],
+                    "errors": [],
+                }
+            }
+        )
+        bundle = fetch_snapshot(["META"], provider=provider, as_of=date(2026, 6, 28))
+        metadata = bundle.to_payload()["metadata"]
+        self.assertEqual(metadata["as_of"], "2026-06-28")
+        self.assertEqual(metadata["requested_as_of"], "2026-06-28")
+        self.assertEqual(metadata["source_data_end_date"], "2026-06-27")
+        self.assertFalse(metadata["point_in_time_verified"])
+
+    def test_shares_growth_yoy_is_emitted_in_percent_units(self) -> None:
+        provider = FakeProvider(
+            {
+                "SHARE": {
+                    "info": {
+                        "sector": "Technology",
+                        "industry": "Software",
+                        "regularMarketPrice": 100,
+                        "marketCap": 100_000_000_000,
+                        "quoteType": "EQUITY",
+                    },
+                    "history": [{"Date": "2026-06-27", "Close": 100, "Volume": 1_000_000}],
+                    "shares": {
+                        "2025-06-27": 100.0,
+                        "2026-06-27": 101.5,
+                    },
+                    "errors": [],
+                }
+            }
+        )
+        bundle = fetch_snapshot(["SHARE"], provider=provider, as_of=date(2026, 6, 28))
+        self.assertAlmostEqual(bundle.records[0]["shares_growth_yoy"], 1.5)
 
     def test_sector_coverage_below_gate_uses_legacy_as_official(self) -> None:
         records = [
@@ -348,7 +401,8 @@ class ScreenerTests(unittest.TestCase):
         )
         report = build_report(records, self.config, strategy_mode="hybrid", top_n=11)
         candidates = {item.ticker: item for item in report.candidates}
-        nometa = candidates["NOMETA"]
+        data_limited = {item.ticker: item for item in report.data_limited_candidates}
+        nometa = data_limited["NOMETA"]
         fullhigh = candidates["FULLHIGH"]
         fullmid = candidates["FULLMID"]
         self.assertEqual(report.sector_aware_status, "enabled")
@@ -358,11 +412,94 @@ class ScreenerTests(unittest.TestCase):
         self.assertIsNotNone(nometa.sector_relative_score_preview)
         self.assertGreater(nometa.sector_relative_score_preview or 0, nometa.legacy_total_score or 0)
         self.assertEqual(nometa.suggested_action, screener.assign_hybrid_action(nometa.record, nometa.legacy_total_score, nometa.legacy_risk_safety_score)[0])
-        ranked_tickers = [item.ticker for item in report.candidates]
-        self.assertLess(ranked_tickers.index("FULLHIGH"), ranked_tickers.index("NOMETA"))
-        self.assertLess(ranked_tickers.index("FULLMID"), ranked_tickers.index("NOMETA"))
         self.assertGreater(nometa.sector_relative_score_preview or 0, fullmid.total_score or 0)
         self.assertEqual(fullhigh.official_score_source, "sector_aware")
+        self.assertNotIn("NOMETA", [item.ticker for item in report.candidates])
+        self.assertIsNone(nometa.official_rank)
+
+    def test_sector_aware_enabled_moves_missing_metadata_names_to_data_limited_candidates(self) -> None:
+        records = [
+            self._sector_preview_record("FULLHIGH", sector="Technology", industry="Software", revenue_growth_yoy=28, eps_growth_yoy=28),
+            self._sector_preview_record("FULLMID", sector="Technology", industry="Software", revenue_growth_yoy=9, eps_growth_yoy=9),
+            self._sector_preview_record("NOMETA", sector=None, industry=None, revenue_growth_yoy=12, eps_growth_yoy=12),
+        ]
+        records.extend(
+            self._sector_preview_record(
+                f"WEAK{index:02d}",
+                sector="Technology",
+                industry="Hardware",
+                revenue_growth_yoy=-5 + index,
+                eps_growth_yoy=-4 + index,
+            )
+            for index in range(30)
+        )
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=10)
+        self.assertEqual(report.sector_aware_status, "enabled")
+        self.assertNotIn("NOMETA", [item.ticker for item in report.candidates])
+        self.assertIn("NOMETA", [item.ticker for item in report.data_limited_candidates])
+        nometa = next(item for item in report.data_limited_candidates if item.ticker == "NOMETA")
+        self.assertEqual(nometa.official_score_source, "legacy_missing_metadata")
+        self.assertIsNone(nometa.official_rank)
+        self.assertEqual(nometa.total_score, nometa.legacy_total_score)
+        self.assertEqual(nometa.sector_relative_peer_source, "universe_missing_metadata")
+
+    def test_stop_mode_percent_fields_do_not_guess_ratio_by_magnitude(self) -> None:
+        record = screener._canonicalize_record(
+            {
+                "ticker": "PCT",
+                "price": 100,
+                "market_cap": 20_000_000_000,
+                "avg_dollar_volume_20d": 50_000_000,
+                "revenue_growth_yoy": 0.5,
+                "eps_growth_yoy": 1.5,
+                "gross_margin_ttm": 15.0,
+                "operating_margin_ttm": 1.51,
+                "roe": 15.0,
+                "roic": 12.0,
+                "free_cash_flow": 1_000_000_000,
+                "shares_growth_yoy": 1.5,
+                "price_vs_200dma": 15.0,
+                "price_vs_sma200_pct": 15.0,
+                "volatility_1y": 15.0,
+                "volatility_63d": 15.0,
+                "max_drawdown_1y": -15.0,
+                "max_drawdown_252d": -15.0,
+            }
+        )
+        self.assertEqual(screener._stop_percent_field(record, "revenue_growth_yoy"), 0.5)
+        self.assertEqual(screener._stop_percent_field(record, "eps_growth_yoy"), 1.5)
+        self.assertEqual(screener._stop_percent_field(record, "operating_margin_ttm"), 1.51)
+        self.assertEqual(screener._stop_percent_field(record, "roe"), 15.0)
+        self.assertEqual(screener._stop_percent_field(record, "shares_growth_yoy"), 1.5)
+        self.assertEqual(screener._stop_percent_field(record, "price_vs_sma200_pct"), 15.0)
+        self.assertEqual(screener._stop_percent_field(record, "volatility_63d"), 15.0)
+        self.assertEqual(screener._stop_percent_field(record, "max_drawdown_252d"), -15.0)
+
+    def test_stop_mode_percent_regression_case_uses_contract_units(self) -> None:
+        record = screener._canonicalize_record(
+            {
+                "ticker": "REG",
+                "price": 100,
+                "market_cap": 20_000_000_000,
+                "avg_dollar_volume_20d": 80_000_000,
+                "revenue_growth_yoy": 0.5,
+                "eps_growth_yoy": 1.5,
+                "gross_margin_ttm": 15.0,
+                "operating_margin_ttm": 1.51,
+                "roe": 15.0,
+                "roic": 12.0,
+                "free_cash_flow": 1_000_000_000,
+                "shares_growth_yoy": 1.5,
+                "price_vs_200dma": 15.0,
+                "volatility_1y": 15.0,
+                "max_drawdown_1y": -15.0,
+            }
+        )
+        penalties, penalty_score = screener.calculate_stop_checking_price_penalties(record)
+        self.assertEqual(penalty_score, 0.0)
+        self.assertFalse(any(item["field"] == "shares_growth_yoy" for item in penalties))
+        reasons = screener.generate_stop_checking_price_reasons(record, {"fundamental": 50.0}, [], 1.0)
+        self.assertIn("ROE / ROIC 表現良好，資本使用效率佳。", reasons)
 
     def test_shadow_preview_missing_metadata_uses_universe_missing_metadata_source(self) -> None:
         candidates = [
@@ -911,8 +1048,8 @@ class ScreenerTests(unittest.TestCase):
 
     def test_stop_sector_aware_official_preserves_legacy_score(self) -> None:
         records = [
-            self._sector_preview_record("STOPA", free_cash_flow=2_000_000_000, shares_growth_yoy=0.01, roe=0.20, roic=0.14),
-            self._sector_preview_record("STOPB", free_cash_flow=1_000_000_000, shares_growth_yoy=0.02, roe=0.12, roic=0.08),
+            self._sector_preview_record("STOPA", free_cash_flow=2_000_000_000, shares_growth_yoy=1.0, roe=20.0, roic=14.0),
+            self._sector_preview_record("STOPB", free_cash_flow=1_000_000_000, shares_growth_yoy=2.0, roe=12.0, roic=8.0),
         ]
         report = build_report(records, self.config, strategy_mode="stop_checking_price", min_score=0, top_n=2)
         self.assertTrue(all(item.legacy_total_score is not None for item in report.candidates))
@@ -920,8 +1057,8 @@ class ScreenerTests(unittest.TestCase):
 
     def test_stop_sector_aware_raw_score_uses_preview_score(self) -> None:
         records = [
-            self._sector_preview_record("STOPA", free_cash_flow=2_000_000_000, shares_growth_yoy=0.01, roe=0.20, roic=0.14),
-            self._sector_preview_record("STOPB", free_cash_flow=1_000_000_000, shares_growth_yoy=0.02, roe=0.12, roic=0.08),
+            self._sector_preview_record("STOPA", free_cash_flow=2_000_000_000, shares_growth_yoy=1.0, roe=20.0, roic=14.0),
+            self._sector_preview_record("STOPB", free_cash_flow=1_000_000_000, shares_growth_yoy=2.0, roe=12.0, roic=8.0),
         ]
         report = build_report(records, self.config, strategy_mode="stop_checking_price", min_score=0, top_n=2)
         candidate = report.candidates[0]
@@ -1303,20 +1440,20 @@ class ScreenerTests(unittest.TestCase):
             "price": 120,
             "market_cap": 60_000_000_000,
             "avg_dollar_volume_20d": 180_000_000,
-            "revenue_growth_yoy": 0.22,
-            "eps_growth_yoy": 0.24,
-            "gross_margin_ttm": 0.58,
-            "operating_margin_ttm": 0.27,
-            "roe": 0.21,
-            "roic": 0.17,
+            "revenue_growth_yoy": 22.0,
+            "eps_growth_yoy": 24.0,
+            "gross_margin_ttm": 58.0,
+            "operating_margin_ttm": 27.0,
+            "roe": 21.0,
+            "roic": 17.0,
             "free_cash_flow": 3_500_000_000,
             "debt_to_equity": 0.6,
-            "shares_growth_yoy": 0.01,
+            "shares_growth_yoy": 1.0,
             "pe_ratio": 28,
             "ps_ratio": 7,
-            "max_drawdown_1y": -0.18,
-            "volatility_1y": 0.22,
-            "price_vs_200dma": 0.08,
+            "max_drawdown_1y": -18.0,
+            "volatility_1y": 22.0,
+            "price_vs_200dma": 8.0,
             "data_age_days": 2,
         }
         hybrid_report = build_report([dict(record)], self.config, strategy_mode="hybrid")
@@ -1440,34 +1577,34 @@ class ScreenerTests(unittest.TestCase):
                 "price": 120,
                 "market_cap": 60000000000,
                 "avg_dollar_volume_20d": 180000000,
-                "revenue_growth_yoy": 0.22,
-                "eps_growth_yoy": 0.24,
-                "gross_margin_ttm": 0.58,
-                "operating_margin_ttm": 0.27,
-                "net_margin_ttm": 0.19,
-                "roe": 0.21,
-                "roic": 0.17,
+                "revenue_growth_yoy": 22.0,
+                "eps_growth_yoy": 24.0,
+                "gross_margin_ttm": 58.0,
+                "operating_margin_ttm": 27.0,
+                "net_margin_ttm": 19.0,
+                "roe": 21.0,
+                "roic": 17.0,
                 "free_cash_flow": 3_500_000_000,
-                "fcf_margin": 0.24,
-                "fcf_growth_yoy": 0.20,
-                "revenue_growth_3y_cagr": 0.18,
+                "fcf_margin": 24.0,
+                "fcf_growth_yoy": 20.0,
+                "revenue_growth_3y_cagr": 18.0,
                 "debt_to_equity": 0.6,
                 "net_debt_to_ebitda": 0.9,
                 "current_ratio": 2.1,
                 "interest_coverage": 12,
-                "shares_growth_yoy": 0.01,
-                "shares_growth_3y_cagr": 0.00,
+                "shares_growth_yoy": 1.0,
+                "shares_growth_3y_cagr": 0.0,
                 "pe_ratio": 28,
                 "forward_pe": 24,
                 "ps_ratio": 7,
                 "ev_to_ebitda": 16,
                 "peg_ratio": 1.4,
                 "relative_strength_252d": 78,
-                "price_vs_200dma": 0.08,
+                "price_vs_200dma": 8.0,
                 "price_vs_sma50_pct": 5,
                 "price_vs_sma200_pct": 9,
-                "max_drawdown_1y": -0.18,
-                "volatility_1y": 0.22,
+                "max_drawdown_1y": -18.0,
+                "volatility_1y": 22.0,
                 "data_age_days": 2,
             }
         ]
@@ -1503,11 +1640,11 @@ class ScreenerTests(unittest.TestCase):
                 "price": 80,
                 "market_cap": 30000000000,
                 "avg_dollar_volume_20d": 90000000,
-                "revenue_growth_yoy": 0.12,
-                "eps_growth_yoy": 0.10,
-                "gross_margin_ttm": 0.45,
-                "operating_margin_ttm": 0.18,
-                "roe": 0.15,
+                "revenue_growth_yoy": 12.0,
+                "eps_growth_yoy": 10.0,
+                "gross_margin_ttm": 45.0,
+                "operating_margin_ttm": 18.0,
+                "roe": 15.0,
                 "data_age_days": 2,
             }
         ]
@@ -1523,23 +1660,24 @@ class ScreenerTests(unittest.TestCase):
                 "ticker": "AAPL",
                 "company_name": "Apple",
                 "sector": "Technology",
+                "industry": "Consumer Electronics",
                 "price": 180,
                 "market_cap": 2_800_000_000_000,
                 "avg_dollar_volume_20d": 120_000_000,
-                "revenue_growth_yoy": 0.10,
-                "eps_growth_yoy": 0.12,
-                "gross_margin_ttm": 0.45,
-                "operating_margin_ttm": 0.28,
-                "roe": 0.25,
-                "roic": 0.20,
+                "revenue_growth_yoy": 10.0,
+                "eps_growth_yoy": 12.0,
+                "gross_margin_ttm": 45.0,
+                "operating_margin_ttm": 28.0,
+                "roe": 25.0,
+                "roic": 20.0,
                 "free_cash_flow": 10_000_000_000,
                 "debt_to_equity_raw": 280,
                 "pe_ratio": 28,
                 "ps_ratio": 7,
-                "max_drawdown_1y": -0.15,
-                "volatility_1y": 0.20,
-                "price_vs_200dma": 0.05,
-                "shares_growth_yoy": 0.01,
+                "max_drawdown_1y": -15.0,
+                "volatility_1y": 20.0,
+                "price_vs_200dma": 5.0,
+                "shares_growth_yoy": 1.0,
                 "data_age_days": 2,
             }
         ]
@@ -1560,20 +1698,20 @@ class ScreenerTests(unittest.TestCase):
                 "price": 55,
                 "market_cap": 30_000_000_000,
                 "avg_dollar_volume_20d": 80_000_000,
-                "revenue_growth_yoy": 0.08,
-                "eps_growth_yoy": 0.09,
-                "gross_margin_ttm": 0.42,
-                "operating_margin_ttm": 0.20,
-                "roe": 0.13,
-                "roic": 0.09,
+                "revenue_growth_yoy": 8.0,
+                "eps_growth_yoy": 9.0,
+                "gross_margin_ttm": 42.0,
+                "operating_margin_ttm": 20.0,
+                "roe": 13.0,
+                "roic": 9.0,
                 "free_cash_flow": 2_000_000_000,
                 "debt_to_equity_raw": 1200,
                 "pe_ratio": 11,
                 "ps_ratio": 2,
-                "max_drawdown_1y": -0.12,
-                "volatility_1y": 0.18,
-                "price_vs_200dma": 0.02,
-                "shares_growth_yoy": 0.01,
+                "max_drawdown_1y": -12.0,
+                "volatility_1y": 18.0,
+                "price_vs_200dma": 2.0,
+                "shares_growth_yoy": 1.0,
                 "data_age_days": 2,
             }
         ]
@@ -1589,16 +1727,16 @@ class ScreenerTests(unittest.TestCase):
                 "price": 120,
                 "market_cap": 70_000_000_000,
                 "avg_dollar_volume_20d": 150_000_000,
-                "revenue_growth_yoy": 0.20,
-                "eps_growth_yoy": 0.22,
-                "gross_margin_ttm": 0.55,
-                "operating_margin_ttm": 0.25,
-                "roe": 0.18,
+                "revenue_growth_yoy": 20.0,
+                "eps_growth_yoy": 22.0,
+                "gross_margin_ttm": 55.0,
+                "operating_margin_ttm": 25.0,
+                "roe": 18.0,
                 "pe_ratio": 26,
                 "ps_ratio": 6,
-                "max_drawdown_1y": -0.16,
-                "volatility_1y": 0.20,
-                "price_vs_200dma": 0.03,
+                "max_drawdown_1y": -16.0,
+                "volatility_1y": 20.0,
+                "price_vs_200dma": 3.0,
                 "shares_growth_yoy": None,
                 "roic": None,
                 "free_cash_flow": None,
@@ -1618,23 +1756,23 @@ class ScreenerTests(unittest.TestCase):
                 "price": 100,
                 "market_cap": 50000000000,
                 "avg_dollar_volume_20d": 140000000,
-                "revenue_growth_yoy": -0.08,
-                "eps_growth_yoy": -0.12,
-                "gross_margin_ttm": 0.38,
-                "operating_margin_ttm": -0.05,
-                "net_margin_ttm": -0.02,
-                "roe": 0.08,
-                "roic": 0.05,
+                "revenue_growth_yoy": -8.0,
+                "eps_growth_yoy": -12.0,
+                "gross_margin_ttm": 38.0,
+                "operating_margin_ttm": -5.0,
+                "net_margin_ttm": -2.0,
+                "roe": 8.0,
+                "roic": 5.0,
                 "free_cash_flow": -100,
                 "debt_to_equity": 3.0,
                 "net_debt_to_ebitda": 5.0,
-                "shares_growth_yoy": 0.08,
-                "shares_growth_3y_cagr": 0.07,
+                "shares_growth_yoy": 8.0,
+                "shares_growth_3y_cagr": 7.0,
                 "pe_ratio": 18,
                 "ps_ratio": 4,
-                "max_drawdown_1y": -0.50,
-                "volatility_1y": 0.50,
-                "price_vs_200dma": -0.12,
+                "max_drawdown_1y": -50.0,
+                "volatility_1y": 50.0,
+                "price_vs_200dma": -12.0,
                 "data_age_days": 8,
             }
         )
@@ -1653,23 +1791,23 @@ class ScreenerTests(unittest.TestCase):
                 "price": 100,
                 "market_cap": 50_000_000_000,
                 "avg_dollar_volume_20d": 140_000_000,
-                "revenue_growth_yoy": 0.20,
-                "eps_growth_yoy": 0.20,
-                "gross_margin_ttm": 0.55,
-                "operating_margin_ttm": 0.22,
-                "roe": 0.18,
-                "roic": 0.13,
+                "revenue_growth_yoy": 20.0,
+                "eps_growth_yoy": 20.0,
+                "gross_margin_ttm": 55.0,
+                "operating_margin_ttm": 22.0,
+                "roe": 18.0,
+                "roic": 13.0,
                 "free_cash_flow": 2_000_000_000,
                 "debt_to_equity": 2.2,
-                "shares_growth_yoy": 0.06,
+                "shares_growth_yoy": 6.0,
                 "pe_ratio": 65,
                 "forward_pe": 50,
                 "ps_ratio": 24,
                 "ev_to_ebitda": 38,
                 "peg_ratio": 3.5,
-                "max_drawdown_1y": -0.42,
-                "volatility_1y": 0.85,
-                "price_vs_200dma": 0.02,
+                "max_drawdown_1y": -42.0,
+                "volatility_1y": 85.0,
+                "price_vs_200dma": 2.0,
                 "data_age_days": 2,
             }
         )
@@ -1689,19 +1827,19 @@ class ScreenerTests(unittest.TestCase):
                 "price": 120,
                 "market_cap": 70_000_000_000,
                 "avg_dollar_volume_20d": 150_000_000,
-                "revenue_growth_yoy": 0.20,
-                "eps_growth_yoy": 0.22,
-                "gross_margin_ttm": 0.55,
-                "operating_margin_ttm": 0.25,
-                "roe": 0.22,
+                "revenue_growth_yoy": 20.0,
+                "eps_growth_yoy": 22.0,
+                "gross_margin_ttm": 55.0,
+                "operating_margin_ttm": 25.0,
+                "roe": 22.0,
                 "roic": None,
                 "free_cash_flow": 2_000_000_000,
-                "shares_growth_yoy": 0.01,
+                "shares_growth_yoy": 1.0,
                 "pe_ratio": 26,
                 "ps_ratio": 6,
-                "max_drawdown_1y": -0.16,
-                "volatility_1y": 0.20,
-                "price_vs_200dma": 0.03,
+                "max_drawdown_1y": -16.0,
+                "volatility_1y": 20.0,
+                "price_vs_200dma": 3.0,
                 "data_age_days": 2,
             }
         ]
@@ -1720,19 +1858,19 @@ class ScreenerTests(unittest.TestCase):
             "price": 120,
             "market_cap": 70_000_000_000,
             "avg_dollar_volume_20d": 150_000_000,
-            "revenue_growth_yoy": 0.20,
-            "eps_growth_yoy": 0.22,
-            "gross_margin_ttm": 0.55,
-            "operating_margin_ttm": 0.25,
-            "roe": 0.22,
+            "revenue_growth_yoy": 20.0,
+            "eps_growth_yoy": 22.0,
+            "gross_margin_ttm": 55.0,
+            "operating_margin_ttm": 25.0,
+            "roe": 22.0,
             "roic": None,
             "free_cash_flow": 2_000_000_000,
-            "shares_growth_yoy": 0.01,
+            "shares_growth_yoy": 1.0,
             "pe_ratio": 26,
             "ps_ratio": 6,
-            "max_drawdown_1y": -0.16,
-            "volatility_1y": 0.20,
-            "price_vs_200dma": 0.03,
+            "max_drawdown_1y": -16.0,
+            "volatility_1y": 20.0,
+            "price_vs_200dma": 3.0,
             "data_age_days": 2,
         }
         report = build_report([record], self.config, strategy_mode="stop_checking_price", min_score=0, force_rebalance=True)
@@ -1746,19 +1884,19 @@ class ScreenerTests(unittest.TestCase):
             "price": 120,
             "market_cap": 70_000_000_000,
             "avg_dollar_volume_20d": 150_000_000,
-            "revenue_growth_yoy": 0.20,
-            "eps_growth_yoy": 0.22,
-            "gross_margin_ttm": 0.55,
-            "operating_margin_ttm": 0.25,
+            "revenue_growth_yoy": 20.0,
+            "eps_growth_yoy": 22.0,
+            "gross_margin_ttm": 55.0,
+            "operating_margin_ttm": 25.0,
             "roe": None,
             "roic": None,
             "free_cash_flow": 2_000_000_000,
-            "shares_growth_yoy": 0.01,
+            "shares_growth_yoy": 1.0,
             "pe_ratio": 26,
             "ps_ratio": 6,
-            "max_drawdown_1y": -0.16,
-            "volatility_1y": 0.20,
-            "price_vs_200dma": 0.03,
+            "max_drawdown_1y": -16.0,
+            "volatility_1y": 20.0,
+            "price_vs_200dma": 3.0,
             "data_age_days": 2,
         }
         report = build_report([record], self.config, strategy_mode="stop_checking_price", min_score=0, force_rebalance=True)
@@ -1771,21 +1909,21 @@ class ScreenerTests(unittest.TestCase):
             "price": 120,
             "market_cap": 70_000_000_000,
             "avg_dollar_volume_20d": 150_000_000,
-            "revenue_growth_yoy": 0.20,
-            "eps_growth_yoy": 0.22,
-            "gross_margin_ttm": 0.55,
-            "operating_margin_ttm": 0.25,
-            "roe": 0.22,
-            "roic": 0.14,
+            "revenue_growth_yoy": 20.0,
+            "eps_growth_yoy": 22.0,
+            "gross_margin_ttm": 55.0,
+            "operating_margin_ttm": 25.0,
+            "roe": 22.0,
+            "roic": 14.0,
             "pe_ratio": 26,
             "ps_ratio": 6,
-            "max_drawdown_1y": -0.16,
-            "volatility_1y": 0.20,
-            "price_vs_200dma": 0.03,
+            "max_drawdown_1y": -16.0,
+            "volatility_1y": 20.0,
+            "price_vs_200dma": 3.0,
             "data_age_days": 2,
         }
         records = [
-            dict(base, ticker="NOFCF", free_cash_flow=None, shares_growth_yoy=0.01),
+            dict(base, ticker="NOFCF", free_cash_flow=None, shares_growth_yoy=1.0),
             dict(base, ticker="NOSHARES", free_cash_flow=2_000_000_000, shares_growth_yoy=None),
         ]
         report = build_report(records, self.config, strategy_mode="stop_checking_price", min_score=0, force_rebalance=True)
@@ -1800,19 +1938,19 @@ class ScreenerTests(unittest.TestCase):
             "price": 120,
             "market_cap": 70_000_000_000,
             "avg_dollar_volume_20d": 150_000_000,
-            "revenue_growth_yoy": 0.20,
-            "eps_growth_yoy": 0.22,
-            "gross_margin_ttm": 0.55,
-            "operating_margin_ttm": 0.25,
-            "roe": 0.22,
-            "roic": 0.14,
+            "revenue_growth_yoy": 20.0,
+            "eps_growth_yoy": 22.0,
+            "gross_margin_ttm": 55.0,
+            "operating_margin_ttm": 25.0,
+            "roe": 22.0,
+            "roic": 14.0,
             "free_cash_flow": 2_000_000_000,
-            "shares_growth_yoy": 0.01,
+            "shares_growth_yoy": 1.0,
             "pe_ratio": 26,
             "ps_ratio": 6,
-            "max_drawdown_1y": -0.16,
-            "volatility_1y": 0.20,
-            "price_vs_200dma": 0.03,
+            "max_drawdown_1y": -16.0,
+            "volatility_1y": 20.0,
+            "price_vs_200dma": 3.0,
             "data_age_days": 2,
             "raw": {"history_points": 251},
         }
@@ -1826,20 +1964,20 @@ class ScreenerTests(unittest.TestCase):
             "price": 120,
             "market_cap": 70_000_000_000,
             "avg_dollar_volume_20d": 150_000_000,
-            "revenue_growth_yoy": 0.20,
-            "eps_growth_yoy": 0.22,
-            "gross_margin_ttm": 0.55,
-            "operating_margin_ttm": 0.25,
-            "roe": 0.22,
-            "roic": 0.14,
+            "revenue_growth_yoy": 20.0,
+            "eps_growth_yoy": 22.0,
+            "gross_margin_ttm": 55.0,
+            "operating_margin_ttm": 25.0,
+            "roe": 22.0,
+            "roic": 14.0,
             "free_cash_flow": 2_000_000_000,
-            "shares_growth_yoy": 0.01,
+            "shares_growth_yoy": 1.0,
             "debt_to_equity_raw": 66.509,
             "pe_ratio": 26,
             "ps_ratio": 6,
-            "max_drawdown_1y": -0.16,
-            "volatility_1y": 0.20,
-            "price_vs_200dma": 0.03,
+            "max_drawdown_1y": -16.0,
+            "volatility_1y": 20.0,
+            "price_vs_200dma": 3.0,
             "data_age_days": 2,
         }
         report = build_report([record], self.config, strategy_mode="stop_checking_price", min_score=0)
@@ -1853,19 +1991,19 @@ class ScreenerTests(unittest.TestCase):
             "price": 120,
             "market_cap": 70_000_000_000,
             "avg_dollar_volume_20d": 150_000_000,
-            "revenue_growth_yoy": 0.20,
-            "eps_growth_yoy": 0.22,
-            "gross_margin_ttm": 0.55,
-            "operating_margin_ttm": 0.25,
-            "roe": 0.22,
-            "roic": 0.14,
+            "revenue_growth_yoy": 20.0,
+            "eps_growth_yoy": 22.0,
+            "gross_margin_ttm": 55.0,
+            "operating_margin_ttm": 25.0,
+            "roe": 22.0,
+            "roic": 14.0,
             "free_cash_flow": 2_000_000_000,
-            "shares_growth_yoy": 0.2009,
+            "shares_growth_yoy": 20.09,
             "pe_ratio": 26,
             "ps_ratio": 6,
-            "max_drawdown_1y": -0.16,
-            "volatility_1y": 0.20,
-            "price_vs_200dma": 0.03,
+            "max_drawdown_1y": -16.0,
+            "volatility_1y": 20.0,
+            "price_vs_200dma": 3.0,
             "data_age_days": 2,
         }
         report = build_report([record], self.config, strategy_mode="stop_checking_price", min_score=0)
@@ -1879,20 +2017,20 @@ class ScreenerTests(unittest.TestCase):
             "price": 120,
             "market_cap": 60000000000,
             "avg_dollar_volume_20d": 150000000,
-            "revenue_growth_yoy": 0.20,
-            "eps_growth_yoy": 0.22,
-            "gross_margin_ttm": 0.55,
-            "operating_margin_ttm": 0.25,
-            "roe": 0.18,
-            "roic": 0.14,
+            "revenue_growth_yoy": 20.0,
+            "eps_growth_yoy": 22.0,
+            "gross_margin_ttm": 55.0,
+            "operating_margin_ttm": 25.0,
+            "roe": 18.0,
+            "roic": 14.0,
             "free_cash_flow": 2500000000,
             "debt_to_equity": 0.8,
-            "shares_growth_yoy": 0.01,
+            "shares_growth_yoy": 1.0,
             "pe_ratio": 24,
             "ps_ratio": 6,
-            "max_drawdown_1y": -0.16,
-            "volatility_1y": 0.20,
-            "price_vs_200dma": 0.03,
+            "max_drawdown_1y": -16.0,
+            "volatility_1y": 20.0,
+            "price_vs_200dma": 3.0,
             "price_vs_sma50_pct": 2,
             "price_vs_sma200_pct": 4,
             "data_age_days": 31,
@@ -1922,20 +2060,20 @@ class ScreenerTests(unittest.TestCase):
             "price": 120,
             "market_cap": 60000000000,
             "avg_dollar_volume_20d": 150000000,
-            "revenue_growth_yoy": 0.20,
-            "eps_growth_yoy": 0.22,
-            "gross_margin_ttm": 0.55,
-            "operating_margin_ttm": 0.25,
-            "roe": 0.18,
-            "roic": 0.14,
+            "revenue_growth_yoy": 20.0,
+            "eps_growth_yoy": 22.0,
+            "gross_margin_ttm": 55.0,
+            "operating_margin_ttm": 25.0,
+            "roe": 18.0,
+            "roic": 14.0,
             "free_cash_flow": 2500000000,
             "debt_to_equity": 0.8,
-            "shares_growth_yoy": 0.01,
+            "shares_growth_yoy": 1.0,
             "pe_ratio": 24,
             "ps_ratio": 6,
-            "max_drawdown_1y": -0.16,
-            "volatility_1y": 0.20,
-            "price_vs_200dma": 0.03,
+            "max_drawdown_1y": -16.0,
+            "volatility_1y": 20.0,
+            "price_vs_200dma": 3.0,
             "price_data_age_days": 1,
             "fundamental_data_age_days": 90,
             "shares_data_age_days": 90,
@@ -1953,24 +2091,24 @@ class ScreenerTests(unittest.TestCase):
                 "price": 100,
                 "market_cap": 50000000000,
                 "avg_dollar_volume_20d": 140000000,
-                "revenue_growth_yoy": 0.18,
-                "eps_growth_yoy": 0.20,
-                "gross_margin_ttm": 0.57,
-                "operating_margin_ttm": 0.24,
-                "roe": 0.20,
-                "roic": 0.15,
+                "revenue_growth_yoy": 18.0,
+                "eps_growth_yoy": 20.0,
+                "gross_margin_ttm": 57.0,
+                "operating_margin_ttm": 24.0,
+                "roe": 20.0,
+                "roic": 15.0,
                 "free_cash_flow": 2600000000,
                 "debt_to_equity": 0.7,
-                "shares_growth_yoy": 0.01,
+                "shares_growth_yoy": 1.0,
                 "pe_ratio": 26,
                 "ps_ratio": 6,
                 "ev_to_ebitda": 15,
                 "relative_strength_252d": 58,
-                "price_vs_200dma": 0.02,
+                "price_vs_200dma": 2.0,
                 "price_vs_sma50_pct": 1,
                 "price_vs_sma200_pct": 3,
-                "max_drawdown_1y": -0.14,
-                "volatility_1y": 0.18,
+                "max_drawdown_1y": -14.0,
+                "volatility_1y": 18.0,
                 "data_age_days": 2,
             },
             {
@@ -1978,24 +2116,24 @@ class ScreenerTests(unittest.TestCase):
                 "price": 100,
                 "market_cap": 50000000000,
                 "avg_dollar_volume_20d": 140000000,
-                "revenue_growth_yoy": 0.02,
-                "eps_growth_yoy": 0.01,
-                "gross_margin_ttm": 0.20,
-                "operating_margin_ttm": 0.05,
-                "roe": 0.06,
-                "roic": 0.04,
+                "revenue_growth_yoy": 2.0,
+                "eps_growth_yoy": 1.0,
+                "gross_margin_ttm": 20.0,
+                "operating_margin_ttm": 5.0,
+                "roe": 6.0,
+                "roic": 4.0,
                 "free_cash_flow": -50000000,
                 "debt_to_equity": 3.0,
-                "shares_growth_yoy": 0.09,
+                "shares_growth_yoy": 9.0,
                 "pe_ratio": 18,
                 "ps_ratio": 3,
                 "ev_to_ebitda": 10,
                 "relative_strength_252d": 96,
-                "price_vs_200dma": 0.18,
+                "price_vs_200dma": 18.0,
                 "price_vs_sma50_pct": 14,
                 "price_vs_sma200_pct": 20,
-                "max_drawdown_1y": -0.45,
-                "volatility_1y": 0.46,
+                "max_drawdown_1y": -45.0,
+                "volatility_1y": 46.0,
                 "data_age_days": 2,
             },
         ]
@@ -2078,7 +2216,10 @@ class ScreenerTests(unittest.TestCase):
         bundle = SnapshotBundle(
             source_name="yfinance",
             as_of="2025-01-06",
+            requested_as_of="2025-01-06",
             fetched_at="2025-01-06T08:00:00",
+            source_data_end_date="2025-01-03",
+            point_in_time_verified=False,
             records=[{"ticker": "AAPL", "price": 200, "market_cap": 3000000000000, "avg_dollar_volume_20d": 8000000000}],
             warnings=["AAPL: test warning"],
             errors=[],
@@ -2178,8 +2319,8 @@ class ScreenerTests(unittest.TestCase):
 
     def test_market_regime_stop_risk_on_keeps_weights(self) -> None:
         records = [
-            self._sector_preview_record("STOPA", free_cash_flow=2_000_000_000, shares_growth_yoy=0.01, roe=0.20, roic=0.14),
-            self._sector_preview_record("STOPB", free_cash_flow=1_000_000_000, shares_growth_yoy=0.02, roe=0.12, roic=0.08),
+            self._sector_preview_record("STOPA", free_cash_flow=2_000_000_000, shares_growth_yoy=1.0, roe=20.0, roic=14.0),
+            self._sector_preview_record("STOPB", free_cash_flow=1_000_000_000, shares_growth_yoy=2.0, roe=12.0, roic=8.0),
         ]
         report = build_report(records, self.config, strategy_mode="stop_checking_price", min_score=0, top_n=2, market_context=self._market_context("risk_on"))
         self.assertEqual(report.effective_composite_weights, {"fundamental": 0.55, "risk_safety": 0.3, "momentum": 0.15})
@@ -2189,14 +2330,14 @@ class ScreenerTests(unittest.TestCase):
             self._sector_preview_record(
                 "STOPA",
                 free_cash_flow=-100,
-                shares_growth_yoy=0.08,
-                roe=0.20,
-                roic=0.14,
+                shares_growth_yoy=8.0,
+                roe=20.0,
+                roic=14.0,
                 debt_to_equity=3.0,
                 volatility_63d=55,
                 max_drawdown_252d=45,
             ),
-            self._sector_preview_record("STOPB", free_cash_flow=1_000_000_000, shares_growth_yoy=0.02, roe=0.12, roic=0.08),
+            self._sector_preview_record("STOPB", free_cash_flow=1_000_000_000, shares_growth_yoy=2.0, roe=12.0, roic=8.0),
         ]
         report = build_report(records, self.config, strategy_mode="stop_checking_price", min_score=0, top_n=2, market_context=self._market_context("risk_off"))
         candidate = next(item for item in report.candidates if item.ticker == "STOPA")
@@ -2245,7 +2386,7 @@ class ScreenerTests(unittest.TestCase):
         ]
         records.extend(self._sector_preview_record(f"WEAK{i:02d}", sector="Technology", industry="Hardware", revenue_growth_yoy=-5 + i, eps_growth_yoy=-4 + i, relative_strength_252d=20 + i) for i in range(9))
         report = build_report(records, self.config, strategy_mode="hybrid", top_n=12, market_context=self._market_context("risk_on"))
-        nometa = next(item for item in report.candidates if item.ticker == "NOMETA")
+        nometa = next(item for item in report.data_limited_candidates if item.ticker == "NOMETA")
         fullmid = next(item for item in report.candidates if item.ticker == "FULLMID")
         self.assertEqual(nometa.official_score_source, "legacy_missing_metadata")
         expected_total = screener.weighted_average_available(
@@ -2271,12 +2412,43 @@ class ScreenerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             payload = {
-                "metadata": {"as_of": "2026-01-30"},
+                "metadata": {"as_of": "2026-01-30", "requested_as_of": "2026-01-31", "point_in_time_verified": True},
                 "records": [self._backtest_record("AAA", 100)],
             }
             (root / "2026-01-31.json").write_text(json.dumps(payload))
             with self.assertRaises(ValueError):
                 backtest.load_historical_snapshots(root)
+
+    def test_backtest_fails_when_filename_date_mismatches_requested_as_of(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            payload = {
+                "metadata": {"as_of": "2026-01-31", "requested_as_of": "2026-01-30", "point_in_time_verified": True},
+                "records": [self._backtest_record("AAA", 100)],
+            }
+            (root / "2026-01-31.json").write_text(json.dumps(payload))
+            with self.assertRaises(ValueError):
+                backtest.load_historical_snapshots(root)
+
+    def test_backtest_rejects_unverified_snapshots_without_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_backtest_snapshot(root, "2026-01-31", [self._backtest_record("AAA", 100)])
+            payload = json.loads((root / "2026-01-31.json").read_text())
+            payload["metadata"]["point_in_time_verified"] = False
+            (root / "2026-01-31.json").write_text(json.dumps(payload))
+            with self.assertRaises(ValueError):
+                backtest.load_historical_snapshots(root)
+
+    def test_backtest_allows_unverified_snapshots_with_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_backtest_snapshot(root, "2026-01-31", [self._backtest_record("AAA", 100)])
+            payload = json.loads((root / "2026-01-31.json").read_text())
+            payload["metadata"]["point_in_time_verified"] = False
+            (root / "2026-01-31.json").write_text(json.dumps(payload))
+            snapshots = backtest.load_historical_snapshots(root, allow_unverified_historical=True)
+            self.assertEqual(len(snapshots), 1)
 
     def test_backtest_monthly_uses_last_available_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2324,11 +2496,14 @@ class ScreenerTests(unittest.TestCase):
                 spy_prices={"2026-01-31": 500, "2026-02-28": 510},
             )
             top20 = next(item for item in summaries if item.portfolio_name == backtest.TOP_20)
+            self.assertEqual(top20.expected_period_count, 1)
             self.assertEqual(top20.missing_return_period_count, 1)
             self.assertEqual(top20.missing_return_ticker_count, 1)
             self.assertEqual(top20.missing_return_tickers, ["BBB"])
             self.assertIsNone(top20.periods[0].return_value)
+            self.assertEqual(top20.periods[0].period_status, "missing_next_period_price")
             self.assertIsNone(top20.cagr)
+            self.assertEqual(top20.metric_status, "incomplete_coverage")
 
     def test_backtest_turnover_uses_half_absolute_weight_change(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2403,12 +2578,37 @@ class ScreenerTests(unittest.TestCase):
             self.assertEqual(top20.periods[0].universe_benchmark_eligible_count, 2)
             self.assertAlmostEqual(top20.periods[0].benchmark_universe_return, 0.0)
 
+    def test_backtest_no_candidate_period_keeps_expected_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            jan = [self._backtest_record("AAA", 100)]
+            feb = [self._backtest_record("BBB", 4, market_cap=1_000_000_000, avg_dollar_volume_20d=1_000_000)]
+            mar = [self._backtest_record("AAA", 110)]
+            self._write_backtest_snapshot(root, "2026-01-31", jan, benchmarks={"SPY": 500})
+            self._write_backtest_snapshot(root, "2026-02-28", feb, benchmarks={"SPY": 510})
+            self._write_backtest_snapshot(root, "2026-03-31", mar, benchmarks={"SPY": 520})
+            snapshots = backtest.load_historical_snapshots(root)
+            summaries = backtest.run_backtest(snapshots, "hybrid", config=self.config, spy_prices={"2026-01-31": 500, "2026-02-28": 510, "2026-03-31": 520})
+            top20 = next(item for item in summaries if item.portfolio_name == backtest.TOP_20)
+            self.assertEqual(top20.expected_period_count, 2)
+            self.assertEqual(top20.invalid_period_count, 2)
+            self.assertEqual(top20.no_candidate_period_count, 1)
+            self.assertEqual(top20.periods[1].period_status, "no_candidates")
+            self.assertEqual(top20.benchmark_spy_expected_period_count, 2)
+            self.assertEqual(top20.benchmark_universe_expected_period_count, 2)
+
     def test_backtest_outputs_include_research_flags_and_do_not_use_network(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             out = root / "outputs" / "hybrid-backtest"
             self._write_backtest_snapshot(root, "2026-01-31", [self._backtest_record("AAA", 100)], benchmarks={"SPY": 500})
             self._write_backtest_snapshot(root, "2026-02-28", [self._backtest_record("AAA", 110)], benchmarks={"SPY": 510})
+            payload = json.loads((root / "2026-01-31.json").read_text())
+            payload["metadata"]["point_in_time_verified"] = False
+            (root / "2026-01-31.json").write_text(json.dumps(payload))
+            payload = json.loads((root / "2026-02-28.json").read_text())
+            payload["metadata"]["point_in_time_verified"] = False
+            (root / "2026-02-28.json").write_text(json.dumps(payload))
             with mock.patch("socket.socket", side_effect=AssertionError("network should not be used")):
                 exit_code = backtest.main(
                     [
@@ -2418,6 +2618,7 @@ class ScreenerTests(unittest.TestCase):
                         "hybrid",
                         "--output-prefix",
                         str(out),
+                        "--allow-unverified-historical",
                     ]
                 )
             self.assertEqual(exit_code, 0)
@@ -2428,8 +2629,10 @@ class ScreenerTests(unittest.TestCase):
             self.assertIn("survivorship_bias_possible", summary_csv)
             self.assertIn("not_for_automated_trading", summary_csv)
             self.assertIn("missing_return_policy", summary_csv)
+            self.assertIn("allow_unverified_historical", summary_csv)
             self.assertIn("research_only: `true`", markdown)
             self.assertIn("missing_return_policy: `invalidate_portfolio_period`", markdown)
+            self.assertIn("allow_unverified_historical: `true`", markdown)
 
     def test_backtest_sortino_na_when_no_negative_periods(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2448,6 +2651,7 @@ class ScreenerTests(unittest.TestCase):
                     "hybrid",
                     "--output-prefix",
                     str(out),
+                    "--allow-unverified-historical",
                 ]
             )
             self.assertEqual(exit_code, 0)
@@ -2478,6 +2682,7 @@ class ScreenerTests(unittest.TestCase):
                     "hybrid",
                     "--output-prefix",
                     str(out),
+                    "--allow-unverified-historical",
                 ]
             )
             self.assertEqual(exit_code, 0)
@@ -2487,6 +2692,61 @@ class ScreenerTests(unittest.TestCase):
             self.assertNotEqual(top20["sortino_ratio"], "N/A")
             self.assertNotEqual(top20["sortino_ratio"], "")
             self.assertEqual(top20["sortino_reason"], "")
+
+    def test_backtest_sortino_incomplete_when_coverage_below_ninety_percent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            history = root / "history"
+            history.mkdir()
+            self._write_backtest_snapshot(history, "2026-01-31", [self._backtest_record("AAA", 100)], benchmarks={"SPY": 500})
+            self._write_backtest_snapshot(history, "2026-02-28", [], benchmarks={"SPY": 510})
+            self._write_backtest_snapshot(history, "2026-03-31", [self._backtest_record("AAA", 110)], benchmarks={"SPY": 520})
+            out = root / "out" / "hybrid.out"
+            out.parent.mkdir(parents=True)
+            exit_code = backtest.main(
+                [
+                    "--snapshots-dir",
+                    str(history),
+                    "--strategy-mode",
+                    "hybrid",
+                    "--output-prefix",
+                    str(out),
+                    "--allow-unverified-historical",
+                ]
+            )
+            self.assertEqual(exit_code, 0)
+            with (out.with_suffix(".summary.csv")).open() as handle:
+                summary_rows = list(csv.DictReader(handle))
+            top20 = next(row for row in summary_rows if row["portfolio_name"] == "top_20")
+            self.assertEqual(top20["sortino_ratio"], "INCOMPLETE")
+            self.assertEqual(top20["sortino_reason"], "incomplete_coverage")
+
+    def test_backtest_all_zero_returns_sortino_is_na(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            history = root / "history"
+            history.mkdir()
+            self._write_backtest_snapshot(history, "2026-01-31", [self._backtest_record("AAA", 100)], benchmarks={"SPY": 500})
+            self._write_backtest_snapshot(history, "2026-02-28", [self._backtest_record("AAA", 100)], benchmarks={"SPY": 500})
+            out = root / "out" / "hybrid.out"
+            out.parent.mkdir(parents=True)
+            exit_code = backtest.main(
+                [
+                    "--snapshots-dir",
+                    str(history),
+                    "--strategy-mode",
+                    "hybrid",
+                    "--output-prefix",
+                    str(out),
+                    "--allow-unverified-historical",
+                ]
+            )
+            self.assertEqual(exit_code, 0)
+            with (out.with_suffix(".summary.csv")).open() as handle:
+                summary_rows = list(csv.DictReader(handle))
+            top20 = next(row for row in summary_rows if row["portfolio_name"] == "top_20")
+            self.assertEqual(top20["sortino_ratio"], "N/A")
+            self.assertEqual(top20["sortino_reason"], "no_negative_return_periods")
 
     def test_backtest_sortino_format_change_does_not_change_other_metrics(self) -> None:
         period_returns = [0.10]
@@ -2506,6 +2766,7 @@ class ScreenerTests(unittest.TestCase):
         kind, rows = parse_uploaded_content("snapshot.csv", content)
         self.assertEqual(kind, "records")
         self.assertEqual(rows[0]["ticker"], "AAPL")
+
         self.assertEqual(rows[0]["price"], "180")
 
     def test_web_sample_universe_request_is_offline(self) -> None:

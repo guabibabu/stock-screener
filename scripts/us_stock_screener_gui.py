@@ -1334,6 +1334,7 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
         f"dedupe_company：{'啟用' if report.dedupe_company else '未啟用'}",
         f"硬篩通過 {report.hard_pass_count} 檔",
         f"顯示前 {len(report.candidates)} 名",
+        f"data_limited_candidates：{len(report.data_limited_candidates)}",
         f"hard_exclusion count：{len(report.hard_excluded)}",
         f"soft_penalty count：{len(report.soft_penalties)}",
         f"missing_data count：{len(report.missing_data_warnings)}",
@@ -1489,6 +1490,16 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
             missing_fields = "、".join(item.get("missing_fields", [])) or "部分欄位缺失"
             cap = f"｜動作限制：{item.get('action_cap_reason')}" if item.get("action_cap_reason") else ""
             lines.append(f"- {item['ticker']}：{missing_fields}{cap}")
+    if report.data_limited_candidates:
+        lines.append("")
+        lines.append("Data-limited candidates")
+        lines.append("")
+        for item in report.data_limited_candidates:
+            lines.append(
+                f"- {item.ticker}｜score {item.total_score if item.total_score is not None else 'N/A'}"
+                f"｜official source {item.official_score_source or 'N/A'}"
+                f"｜action {item.suggested_action or 'N/A'}"
+            )
     return "\n".join(lines)
 
 
