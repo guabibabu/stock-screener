@@ -343,7 +343,7 @@ Stop mode 會套用 soft penalty，總扣分上限為 25 分。
 - `shares_growth_3y_cagr > 0.05`：扣 8
 - `revenue_growth_yoy < -0.05`：扣 6
 - `eps_growth_yoy < -0.10`：扣 6
-- `max_drawdown_1y < -0.40`：扣 8
+- `max_drawdown_1y > 40`：扣 8
 - `volatility_1y > 0.80`：扣 6
 - `price_data_age_days > 7`：扣 8
 - `price_data_age_days > 3`：扣 4
@@ -357,6 +357,22 @@ Stop mode 會計算資料完整度：
 ```text
 confidence_score = available_required_fields / total_required_fields
 ```
+
+## Drawdown 與 Sector-aware 正式語意
+
+目前正式契約：
+
+- `max_drawdown_1y`、`max_drawdown_252d` 都是正回撤幅度
+- `15` = 回撤 15%
+- `40` = 回撤 40%
+- `75` = 回撤 75%
+
+Sector-aware percentile scoring 已是正式分數的一部分：
+
+- 會影響 `total_score`
+- 會影響排名
+- 會影響 `suggested_action`
+- `legacy_*` 欄位只保留作對照
 
 Required fields：
 

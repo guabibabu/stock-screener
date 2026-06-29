@@ -111,7 +111,7 @@ If benchmark metadata is not embedded in the snapshot, the backtest can instead 
 | `price_vs_sma200_pct` | Distance from the 200-day moving average, in percent. |
 | `beta` | Beta versus the market. |
 | `volatility_63d` | 63-day realized volatility, in percent. |
-| `max_drawdown_252d` | 252-day max drawdown, in percent. |
+| `max_drawdown_252d` | 252-day max drawdown, in positive percent points. Example: `15` = 15% drawdown. |
 | `debt_to_equity` | Debt-to-equity ratio. |
 | `data_age_days` | Age of the latest snapshot in days. |
 | `price_data_age_days` | Age of price/volume data in days. Falls back to `data_age_days` if omitted. |
@@ -162,6 +162,37 @@ This mode works best when the company snapshot is richer. These fields are optio
 - `normalization_notes` shows debug-style field conversions, such as yfinance `debtToEquity` percentage normalization.
 - `action_cap_reason` explains why the suggested action was capped.
 - Missing `roic` with available `roe` is treated as a softer limitation than missing `free_cash_flow` or `shares_growth_yoy`.
+
+## Percent And Drawdown Unit Contract
+
+CSV / JSON snapshot inputs use percent points directly. They are not auto-converted by magnitude.
+
+Examples:
+
+- `0.5` = `0.5%`
+- `1.5` = `1.5%`
+- `15` = `15%`
+- `150` = `150%`
+
+Provider ratio fields must be converted explicitly by source-field mapping before they enter the snapshot contract.
+
+Drawdown fields use positive drawdown magnitude:
+
+- `max_drawdown_1y = 15` means a 15% drawdown
+- `max_drawdown_1y = 40` means a 40% drawdown
+- `max_drawdown_1y = 75` means a 75% drawdown
+
+Signed legacy aliases may be normalized only when the field semantics explicitly imply signed drawdown:
+
+- `drawdown_1y`
+- `drawdown_252d`
+- `max_drawdown`
+- `drawdown`
+
+Canonical drawdown fields must not silently flip sign:
+
+- `max_drawdown_1y`
+- `max_drawdown_252d`
 
 ## Report Diagnostics
 
@@ -230,7 +261,7 @@ Each candidate can include:
 - `sector`: same-sector peers were used.
 - `industry`: same-industry peers were used.
 - `universe_insufficient_peers`: industry and sector metadata were present but peer count was too small, so the full candidate universe was used.
-- `universe_missing_metadata`: preview-only fallback when the stock is missing sector or industry metadata.
+- `universe_missing_metadata`: preview fallback when the stock is missing sector or industry metadata. The official score path still remains separate and may fall back to legacy scoring.
 - `not_scored_sector_aware_disabled`: official sector-aware scoring was disabled because overall sector coverage was below the gate.
 
 Official scoring provenance is separate from preview peer provenance:

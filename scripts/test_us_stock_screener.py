@@ -18,6 +18,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 import us_stock_screener as screener
 import backtest_us_stock_screener as backtest
+import us_stock_screener_web as screener_web
 from us_stock_screener import ScreenConfig, build_report, load_records, screen_records
 from fetch_yfinance_snapshot import (
     SnapshotBundle,
@@ -489,8 +490,8 @@ class ScreenerTests(unittest.TestCase):
                 "price_vs_sma200_pct": 15.0,
                 "volatility_1y": 15.0,
                 "volatility_63d": 15.0,
-                "max_drawdown_1y": -15.0,
-                "max_drawdown_252d": -15.0,
+                "max_drawdown_1y": 15.0,
+                "max_drawdown_252d": 15.0,
             }
         )
         self.assertEqual(screener._stop_percent_field(record, "revenue_growth_yoy"), 0.5)
@@ -500,7 +501,7 @@ class ScreenerTests(unittest.TestCase):
         self.assertEqual(screener._stop_percent_field(record, "shares_growth_yoy"), 1.5)
         self.assertEqual(screener._stop_percent_field(record, "price_vs_sma200_pct"), 15.0)
         self.assertEqual(screener._stop_percent_field(record, "volatility_63d"), 15.0)
-        self.assertEqual(screener._stop_percent_field(record, "max_drawdown_252d"), -15.0)
+        self.assertEqual(screener._stop_percent_field(record, "max_drawdown_252d"), 15.0)
 
     def test_stop_mode_percent_regression_case_uses_contract_units(self) -> None:
         record = screener._canonicalize_record(
@@ -519,7 +520,7 @@ class ScreenerTests(unittest.TestCase):
                 "shares_growth_yoy": 1.5,
                 "price_vs_200dma": 15.0,
                 "volatility_1y": 15.0,
-                "max_drawdown_1y": -15.0,
+                "max_drawdown_1y": 15.0,
             }
         )
         penalties, penalty_score = screener.calculate_stop_checking_price_penalties(record)
@@ -527,6 +528,129 @@ class ScreenerTests(unittest.TestCase):
         self.assertFalse(any(item["field"] == "shares_growth_yoy" for item in penalties))
         reasons = screener.generate_stop_checking_price_reasons(record, {"fundamental": 50.0}, [], 1.0)
         self.assertIn("ROE / ROIC 表現良好，資本使用效率佳。", reasons)
+
+    def test_provider_ratio_percent_conversion_uses_field_contract(self) -> None:
+        cases = [
+            (0.005, 0.5),
+            (0.015, 1.5),
+            (0.0151, 1.51),
+            (1.5, 150.0),
+            (1.51, 151.0),
+            (2.0, 200.0),
+        ]
+        for raw_value, expected in cases:
+            provider = FakeProvider(
+                {
+                    "RATIO": {
+                        "info": {
+                            "regularMarketPrice": 100,
+                            "marketCap": 10_000_000_000,
+                            "quoteType": "EQUITY",
+                            "fullExchangeName": "NASDAQ",
+                            "revenueGrowth": raw_value,
+                        },
+                        "history": [
+                            {"Date": "2025-01-01", "Close": 100, "Volume": 1_000_000},
+                            {"Date": "2025-01-02", "Close": 101, "Volume": 1_100_000},
+                        ],
+                    }
+                }
+            )
+            bundle = fetch_snapshot(["RATIO"], provider=provider, as_of=date(2025, 3, 1))
+            self.assertEqual(bundle.records[0]["revenue_growth_yoy"], expected)
+
+    def test_csv_json_percent_contract_preserves_percent_points(self) -> None:
+        for raw_value in [0.5, 1.0, 1.5, 1.51, 2.0, 15.0, 150.0]:
+            record = screener._canonicalize_record(
+                {
+                    "ticker": "CSVP",
+                    "price": 100,
+                    "market_cap": 20_000_000_000,
+                    "avg_dollar_volume_20d": 50_000_000,
+                    "revenue_growth_yoy": raw_value,
+                }
+            )
+            self.assertEqual(screener._stop_percent_field(record, "revenue_growth_yoy"), raw_value)
+
+    def test_negative_canonical_drawdown_is_rejected_and_flagged(self) -> None:
+        record = screener._canonicalize_record(
+            {
+                "ticker": "NEGDD",
+                "price": 100,
+                "market_cap": 20_000_000_000,
+                "avg_dollar_volume_20d": 50_000_000,
+                "max_drawdown_1y": -15.0,
+            }
+        )
+        self.assertIsNone(record.max_drawdown_1y)
+        self.assertIn("drawdown_unit_or_sign_unknown", " ".join(screener.data_quality_flags(record)))
+
+    def test_legacy_signed_drawdown_alias_is_normalized_with_note(self) -> None:
+        record = screener._canonicalize_record(
+            {
+                "ticker": "LEGDD",
+                "price": 100,
+                "market_cap": 20_000_000_000,
+                "avg_dollar_volume_20d": 50_000_000,
+                "drawdown_1y": -15.0,
+            }
+        )
+        self.assertEqual(record.max_drawdown_1y, 15.0)
+        self.assertTrue(any("legacy signed drawdown" in note for note in screener.normalization_notes(record)))
+
+    def test_provider_snapshot_stop_drawdown_end_to_end_respects_positive_drawdown_contract(self) -> None:
+        cases = [
+            (15.0, False),
+            (40.0, False),
+            (50.0, True),
+            (75.0, True),
+        ]
+        scores = []
+        for drawdown, expect_penalty in cases:
+            trough_close = 120.0 * (1.0 - drawdown / 100.0)
+            provider = FakeProvider(
+                {
+                    "DDD": {
+                        "info": {
+                            "regularMarketPrice": trough_close,
+                            "marketCap": 50_000_000_000,
+                            "quoteType": "EQUITY",
+                            "fullExchangeName": "NASDAQ",
+                            "revenueGrowth": 0.20,
+                            "earningsGrowth": 0.20,
+                            "grossMargins": 0.55,
+                            "operatingMargins": 0.25,
+                            "returnOnEquity": 0.18,
+                            "trailingPE": 22,
+                            "priceToSalesTrailing12Months": 5,
+                            "beta": 1.0,
+                            "freeCashflow": 1_000_000_000,
+                        },
+                        "history": [
+                            {"Date": "2025-01-01", "Close": 100, "Volume": 1_000_000},
+                            {"Date": "2025-01-02", "Close": 120, "Volume": 1_100_000},
+                            {"Date": "2025-01-03", "Close": trough_close, "Volume": 1_200_000},
+                        ],
+                        "shares": {
+                            "2024-01-03": 100.0,
+                            "2025-01-03": 101.0,
+                        },
+                    }
+                }
+            )
+            bundle = fetch_snapshot(["DDD"], provider=provider, as_of=date(2025, 1, 4))
+            record = screener._canonicalize_record(bundle.records[0])
+            score = screener._stop_drawdown_score(record)
+            penalties, penalty_score = screener.calculate_stop_checking_price_penalties(record)
+            self.assertEqual(record.max_drawdown_252d, drawdown)
+            has_deep_penalty = any(item["field"] == "max_drawdown_1y" for item in penalties)
+            self.assertEqual(has_deep_penalty, expect_penalty)
+            if expect_penalty:
+                self.assertGreater(penalty_score, 0.0)
+            scores.append((drawdown, score))
+        self.assertGreater(scores[0][1], scores[1][1])
+        self.assertGreater(scores[1][1], scores[2][1])
+        self.assertGreaterEqual(scores[2][1], scores[3][1])
 
     def test_shadow_preview_missing_metadata_uses_universe_missing_metadata_source(self) -> None:
         candidates = [
@@ -1177,6 +1301,46 @@ class ScreenerTests(unittest.TestCase):
         self.assertIn("Peer reason", markdown)
         self.assertIn("Peer reason", gui_text)
         self.assertIn("sector_relative_peer_reason", web_payload["candidates"][0])
+
+    def test_cross_surface_review_metadata_include_hard_excluded_and_deduped(self) -> None:
+        records = [
+            self._sector_preview_record("GOOG", sector="Technology", industry="Internet", revenue_growth_yoy=25, eps_growth_yoy=24),
+            self._sector_preview_record("GOOGL", sector="Technology", industry="Internet", revenue_growth_yoy=22, eps_growth_yoy=21),
+            {"ticker": "PENNY", "price": 2.0, "market_cap": 10_000_000_000, "avg_dollar_volume_20d": 90_000_000},
+        ]
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=3)
+        markdown = screener._render_markdown(report)
+        cli_json = json.loads(screener._render_json(report))
+        gui_text = gui_report_to_text(report, "test")
+        web_payload = screener_web._report_to_payload(report, source_name="test")
+        hard = report.hard_excluded[0]
+        deduped = report.deduped[0]
+        self.assertFalse(hard.review_required)
+        self.assertEqual(hard.review_priority, "routine")
+        self.assertEqual(hard.recommended_review_cadence, "")
+        self.assertEqual(hard.review_reasons, [])
+        self.assertFalse(deduped.review_required)
+        self.assertEqual(deduped.review_priority, "routine")
+        self.assertEqual(deduped.recommended_review_cadence, "")
+        self.assertEqual(deduped.review_reasons, [])
+        self.assertIn("Review required", markdown)
+        self.assertIn("去重剔除", markdown)
+        self.assertIn("Review required False", gui_text)
+        self.assertIn("去重剔除", gui_text)
+        self.assertIn("hard_excluded", cli_json)
+        self.assertIn("deduped", cli_json)
+        self.assertIn("review_required", cli_json["hard_excluded"][0])
+        self.assertIn("review_priority", cli_json["hard_excluded"][0])
+        self.assertIn("recommended_review_cadence", cli_json["hard_excluded"][0])
+        self.assertIn("review_reasons", cli_json["hard_excluded"][0])
+        self.assertIn("review_required", cli_json["deduped"][0])
+        self.assertIn("review_priority", cli_json["deduped"][0])
+        self.assertIn("recommended_review_cadence", cli_json["deduped"][0])
+        self.assertIn("review_reasons", cli_json["deduped"][0])
+        self.assertIn("hard_excluded", web_payload)
+        self.assertIn("deduped", web_payload)
+        self.assertIn("review_required", web_payload["hard_excluded"][0])
+        self.assertIn("review_required", web_payload["deduped"][0])
         self.assertIn("檢查模式：manual_decision_support", markdown)
         self.assertIn("review_summary：", markdown)
         self.assertIn("review_mode：manual_decision_support", gui_text)
@@ -1501,7 +1665,7 @@ class ScreenerTests(unittest.TestCase):
             "shares_growth_yoy": 1.0,
             "pe_ratio": 28,
             "ps_ratio": 7,
-            "max_drawdown_1y": -18.0,
+            "max_drawdown_1y": 18.0,
             "volatility_1y": 22.0,
             "price_vs_200dma": 8.0,
             "data_age_days": 2,
@@ -1653,7 +1817,7 @@ class ScreenerTests(unittest.TestCase):
                 "price_vs_200dma": 8.0,
                 "price_vs_sma50_pct": 5,
                 "price_vs_sma200_pct": 9,
-                "max_drawdown_1y": -18.0,
+                "max_drawdown_1y": 18.0,
                 "volatility_1y": 22.0,
                 "data_age_days": 2,
             }
@@ -1774,7 +1938,7 @@ class ScreenerTests(unittest.TestCase):
             "shares_growth_yoy": 1.0,
             "pe_ratio": 24,
             "ps_ratio": 6,
-            "max_drawdown_1y": -18.0,
+            "max_drawdown_1y": 18.0,
             "volatility_1y": 20.0,
             "price_vs_200dma": 8.0,
             "data_age_days": 2,
@@ -1798,7 +1962,7 @@ class ScreenerTests(unittest.TestCase):
             "shares_growth_yoy": 8.0,
             "pe_ratio": 55,
             "ps_ratio": 12,
-            "max_drawdown_1y": -45.0,
+            "max_drawdown_1y": 45.0,
             "volatility_1y": 48.0,
             "price_vs_200dma": -12.0,
             "data_age_days": 2,
@@ -1851,7 +2015,7 @@ class ScreenerTests(unittest.TestCase):
             "shares_growth_yoy": 8.0,
             "pe_ratio": 80,
             "ps_ratio": 15,
-            "max_drawdown_1y": -50.0,
+            "max_drawdown_1y": 50.0,
             "volatility_1y": 55.0,
             "price_vs_200dma": -18.0,
             "data_age_days": 2,
@@ -1889,7 +2053,7 @@ class ScreenerTests(unittest.TestCase):
             "debt_to_equity": 0.5,
             "pe_ratio": 24,
             "ps_ratio": 6,
-            "max_drawdown_1y": -18.0,
+            "max_drawdown_1y": 18.0,
             "volatility_1y": 20.0,
             "price_vs_200dma": 8.0,
             "data_age_days": 2,
@@ -1913,7 +2077,7 @@ class ScreenerTests(unittest.TestCase):
             "shares_growth_yoy": 8.0,
             "pe_ratio": 55,
             "ps_ratio": 12,
-            "max_drawdown_1y": -45.0,
+            "max_drawdown_1y": 45.0,
             "volatility_1y": 48.0,
             "price_vs_200dma": -12.0,
             "data_age_days": 2,
@@ -1952,7 +2116,7 @@ class ScreenerTests(unittest.TestCase):
             "shares_growth_yoy": 1.0,
             "pe_ratio": 24,
             "ps_ratio": 6,
-            "max_drawdown_1y": -18.0,
+            "max_drawdown_1y": 18.0,
             "volatility_1y": 20.0,
             "price_vs_200dma": 8.0,
             "data_age_days": 2,
@@ -1976,7 +2140,7 @@ class ScreenerTests(unittest.TestCase):
             "shares_growth_yoy": 9.0,
             "pe_ratio": 90,
             "ps_ratio": 16,
-            "max_drawdown_1y": -55.0,
+            "max_drawdown_1y": 55.0,
             "volatility_1y": 60.0,
             "price_vs_200dma": -22.0,
             "data_age_days": 2,
@@ -2093,7 +2257,7 @@ class ScreenerTests(unittest.TestCase):
                 "debt_to_equity_raw": 280,
                 "pe_ratio": 28,
                 "ps_ratio": 7,
-                "max_drawdown_1y": -15.0,
+                "max_drawdown_1y": 15.0,
                 "volatility_1y": 20.0,
                 "price_vs_200dma": 5.0,
                 "shares_growth_yoy": 1.0,
@@ -2127,7 +2291,7 @@ class ScreenerTests(unittest.TestCase):
                 "debt_to_equity_raw": 1200,
                 "pe_ratio": 11,
                 "ps_ratio": 2,
-                "max_drawdown_1y": -12.0,
+                "max_drawdown_1y": 12.0,
                 "volatility_1y": 18.0,
                 "price_vs_200dma": 2.0,
                 "shares_growth_yoy": 1.0,
@@ -2153,7 +2317,7 @@ class ScreenerTests(unittest.TestCase):
                 "roe": 18.0,
                 "pe_ratio": 26,
                 "ps_ratio": 6,
-                "max_drawdown_1y": -16.0,
+                "max_drawdown_1y": 16.0,
                 "volatility_1y": 20.0,
                 "price_vs_200dma": 3.0,
                 "shares_growth_yoy": None,
@@ -2189,7 +2353,7 @@ class ScreenerTests(unittest.TestCase):
                 "shares_growth_3y_cagr": 7.0,
                 "pe_ratio": 18,
                 "ps_ratio": 4,
-                "max_drawdown_1y": -50.0,
+                "max_drawdown_1y": 50.0,
                 "volatility_1y": 50.0,
                 "price_vs_200dma": -12.0,
                 "data_age_days": 8,
@@ -2224,7 +2388,7 @@ class ScreenerTests(unittest.TestCase):
                 "ps_ratio": 24,
                 "ev_to_ebitda": 38,
                 "peg_ratio": 3.5,
-                "max_drawdown_1y": -42.0,
+                "max_drawdown_1y": 42.0,
                 "volatility_1y": 85.0,
                 "price_vs_200dma": 2.0,
                 "data_age_days": 2,
@@ -2256,7 +2420,7 @@ class ScreenerTests(unittest.TestCase):
                 "shares_growth_yoy": 1.0,
                 "pe_ratio": 26,
                 "ps_ratio": 6,
-                "max_drawdown_1y": -16.0,
+                "max_drawdown_1y": 16.0,
                 "volatility_1y": 20.0,
                 "price_vs_200dma": 3.0,
                 "data_age_days": 2,
@@ -2287,7 +2451,7 @@ class ScreenerTests(unittest.TestCase):
             "shares_growth_yoy": 1.0,
             "pe_ratio": 26,
             "ps_ratio": 6,
-            "max_drawdown_1y": -16.0,
+            "max_drawdown_1y": 16.0,
             "volatility_1y": 20.0,
             "price_vs_200dma": 3.0,
             "data_age_days": 2,
@@ -2313,7 +2477,7 @@ class ScreenerTests(unittest.TestCase):
             "shares_growth_yoy": 1.0,
             "pe_ratio": 26,
             "ps_ratio": 6,
-            "max_drawdown_1y": -16.0,
+            "max_drawdown_1y": 16.0,
             "volatility_1y": 20.0,
             "price_vs_200dma": 3.0,
             "data_age_days": 2,
@@ -2336,7 +2500,7 @@ class ScreenerTests(unittest.TestCase):
             "roic": 14.0,
             "pe_ratio": 26,
             "ps_ratio": 6,
-            "max_drawdown_1y": -16.0,
+            "max_drawdown_1y": 16.0,
             "volatility_1y": 20.0,
             "price_vs_200dma": 3.0,
             "data_age_days": 2,
@@ -2367,7 +2531,7 @@ class ScreenerTests(unittest.TestCase):
             "shares_growth_yoy": 1.0,
             "pe_ratio": 26,
             "ps_ratio": 6,
-            "max_drawdown_1y": -16.0,
+            "max_drawdown_1y": 16.0,
             "volatility_1y": 20.0,
             "price_vs_200dma": 3.0,
             "data_age_days": 2,
@@ -2394,7 +2558,7 @@ class ScreenerTests(unittest.TestCase):
             "debt_to_equity_raw": 66.509,
             "pe_ratio": 26,
             "ps_ratio": 6,
-            "max_drawdown_1y": -16.0,
+            "max_drawdown_1y": 16.0,
             "volatility_1y": 20.0,
             "price_vs_200dma": 3.0,
             "data_age_days": 2,
@@ -2420,7 +2584,7 @@ class ScreenerTests(unittest.TestCase):
             "shares_growth_yoy": 20.09,
             "pe_ratio": 26,
             "ps_ratio": 6,
-            "max_drawdown_1y": -16.0,
+            "max_drawdown_1y": 16.0,
             "volatility_1y": 20.0,
             "price_vs_200dma": 3.0,
             "data_age_days": 2,
@@ -2447,7 +2611,7 @@ class ScreenerTests(unittest.TestCase):
             "shares_growth_yoy": 1.0,
             "pe_ratio": 24,
             "ps_ratio": 6,
-            "max_drawdown_1y": -16.0,
+            "max_drawdown_1y": 16.0,
             "volatility_1y": 20.0,
             "price_vs_200dma": 3.0,
             "price_vs_sma50_pct": 2,
@@ -2490,7 +2654,7 @@ class ScreenerTests(unittest.TestCase):
             "shares_growth_yoy": 1.0,
             "pe_ratio": 24,
             "ps_ratio": 6,
-            "max_drawdown_1y": -16.0,
+            "max_drawdown_1y": 16.0,
             "volatility_1y": 20.0,
             "price_vs_200dma": 3.0,
             "price_data_age_days": 1,
@@ -2526,7 +2690,7 @@ class ScreenerTests(unittest.TestCase):
                 "price_vs_200dma": 2.0,
                 "price_vs_sma50_pct": 1,
                 "price_vs_sma200_pct": 3,
-                "max_drawdown_1y": -14.0,
+                "max_drawdown_1y": 14.0,
                 "volatility_1y": 18.0,
                 "data_age_days": 2,
             },
@@ -2551,7 +2715,7 @@ class ScreenerTests(unittest.TestCase):
                 "price_vs_200dma": 18.0,
                 "price_vs_sma50_pct": 14,
                 "price_vs_sma200_pct": 20,
-                "max_drawdown_1y": -45.0,
+                "max_drawdown_1y": 45.0,
                 "volatility_1y": 46.0,
                 "data_age_days": 2,
             },

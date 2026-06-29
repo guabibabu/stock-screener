@@ -265,7 +265,7 @@ Hybrid candidates can use safer action labels:
 
 ## Percentile Scoring Utilities
 
-The codebase includes reusable percentile scoring helpers for shadow-mode and sector-aware scoring. These helpers are not wired into the live hybrid or stop-mode score, so current rankings and actions are unchanged.
+The codebase includes reusable percentile scoring helpers used by the official sector-aware scoring layer and its diagnostics.
 
 - `winsorize_value`
 - `winsorize_series`
@@ -288,6 +288,21 @@ Phase 2D makes sector-relative percentile scoring the official factor model:
 
 - It now changes `total_score`.
 - It can change formal ranking.
+- It can change `suggested_action`.
+- `legacy_*` fields are retained for comparison only.
+
+## Stop Drawdown Contract
+
+Stop mode treats drawdown as a positive drawdown magnitude:
+
+- `15` = 15% drawdown
+- `40` = 40% drawdown
+- `75` = 75% drawdown
+
+Scoring:
+
+- `drawdown_score = score_low_better(drawdown, 15.0, 50.0)`
+- deep-drawdown penalty triggers when `drawdown > 40.0`
 - It can change `suggested_action` through the recalculated risk/action layer.
 - The previous fixed-threshold score is preserved in `legacy_*` fields for debug and comparison.
 

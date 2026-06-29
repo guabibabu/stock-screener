@@ -526,7 +526,7 @@ STOP_CHECKING_PRICE_SOFT_PENALTIES = [
     ("shares_growth_3y_cagr", ">", 5.0, 8, "三年股本稀釋偏高"),
     ("revenue_growth_yoy", "<", -5.0, 6, "營收年增率明顯衰退"),
     ("eps_growth_yoy", "<", -10.0, 6, "EPS 年增率明顯衰退"),
-    ("max_drawdown_1y", "<", -40.0, 8, "一年最大回撤過深"),
+    ("max_drawdown_1y", ">", 40.0, 8, "一年最大回撤過深"),
     ("volatility_1y", ">", 80.0, 6, "一年波動率偏高"),
     ("data_age_days", ">", 7, 8, "資料超過 7 天"),
     ("data_age_days", ">", 3, 4, "資料超過 3 天"),
@@ -581,6 +581,16 @@ STOP_CHECKING_PRICE_PERCENT_FIELDS = {
     "volatility_1y",
     "volatility_63d",
     "operating_margin_3y_avg",
+}
+SIGNED_DRAWDOWN_INPUT_FIELDS = {
+    "drawdown_1y",
+    "drawdown_252d",
+    "max_drawdown",
+    "drawdown",
+}
+CANONICAL_DRAWDOWN_INPUT_FIELDS = {
+    "max_drawdown_1y",
+    "max_drawdown_252d",
 }
 
 SECTOR_RELATIVE_MIN_PEERS = 30
@@ -965,6 +975,13 @@ def _apply_review_metadata(
     item.review_reasons = _dedupe_reason_sequence(baseline_reasons)
 
 
+def _apply_non_review_metadata(item: ScreenResult) -> None:
+    item.review_required = False
+    item.review_priority = "routine"
+    item.recommended_review_cadence = ""
+    item.review_reasons = []
+
+
 def _build_review_summary(items: Sequence[ScreenResult]) -> Dict[str, int]:
     routine_weekly_count = 0
     routine_quarterly_count = 0
@@ -993,6 +1010,21 @@ def _canonicalize_record(payload: Dict[str, Any]) -> StockRecord:
     ticker = _normalize_ticker(_pick(payload, "ticker", "symbol", "code"))
     if not ticker:
         raise ValueError("missing ticker")
+    drawdown_252d, drawdown_252d_notes, drawdown_252d_flags = _get_drawdown_input_value(
+        payload,
+        "max_drawdown_252d",
+        "drawdown_252d",
+    )
+    drawdown_1y, drawdown_1y_notes, drawdown_1y_flags = _get_drawdown_input_value(
+        payload,
+        "max_drawdown_1y",
+        "drawdown_1y",
+        "max_drawdown",
+        "drawdown",
+    )
+    raw_payload = dict(payload)
+    raw_payload["_normalization_notes"] = drawdown_252d_notes + drawdown_1y_notes
+    raw_payload["_data_quality_flags"] = drawdown_252d_flags + drawdown_1y_flags
     return StockRecord(
         ticker=ticker,
         company_name=_pick(payload, "company_name", "name"),
@@ -1030,8 +1062,8 @@ def _canonicalize_record(payload: Dict[str, Any]) -> StockRecord:
         beta_1y=_coerce_float(_pick(payload, "beta_1y", "beta")),
         volatility_63d=_coerce_float(_pick(payload, "volatility_63d", "realized_volatility_63d")),
         volatility_1y=_coerce_float(_pick(payload, "volatility_1y", "annualized_volatility_1y", "volatility")),
-        max_drawdown_252d=_coerce_float(_pick(payload, "max_drawdown_252d", "drawdown_252d")),
-        max_drawdown_1y=_coerce_float(_pick(payload, "max_drawdown_1y", "drawdown_1y", "max_drawdown")),
+        max_drawdown_252d=drawdown_252d,
+        max_drawdown_1y=drawdown_1y,
         debt_to_equity_raw=_coerce_float(_pick(payload, "debt_to_equity_raw", "debt_to_equity", "de_ratio")),
         debt_to_equity_normalized=_coerce_float(_pick(payload, "debt_to_equity_normalized")),
         debt_to_equity=_normalize_debt_to_equity(
@@ -1058,7 +1090,7 @@ def _canonicalize_record(payload: Dict[str, Any]) -> StockRecord:
         security_type=_pick(payload, "security_type"),
         exchange=_pick(payload, "exchange"),
         notes=_pick(payload, "notes"),
-        raw=dict(payload),
+        raw=raw_payload,
     )
 
 
@@ -1312,6 +1344,26 @@ def _stop_percent_field(record: StockRecord, *names: str) -> Optional[float]:
         if name not in STOP_CHECKING_PRICE_PERCENT_FIELDS:
             raise ValueError(f"Field {name} is not declared as a stop-mode percent field")
     return _stop_field(record, *names)
+
+
+def _get_drawdown_input_value(payload: Dict[str, Any], *keys: str) -> Tuple[Optional[float], List[str], List[str]]:
+    normalization_notes: List[str] = []
+    data_quality_flags: List[str] = []
+    for key in keys:
+        if key not in payload or payload[key] in ("", None):
+            continue
+        value = _coerce_float(payload[key])
+        if value is None:
+            continue
+        if key in SIGNED_DRAWDOWN_INPUT_FIELDS and value < 0:
+            normalized = abs(value)
+            normalization_notes.append(f"{key} 為 legacy signed drawdown，已由 {value} 正規化為 {normalized}。")
+            return normalized, normalization_notes, data_quality_flags
+        if key in CANONICAL_DRAWDOWN_INPUT_FIELDS and value < 0:
+            data_quality_flags.append(f"{key} 為負值，但正式契約要求正回撤幅度；已標記為 drawdown_unit_or_sign_unknown。")
+            return None, normalization_notes, data_quality_flags
+        return value, normalization_notes, data_quality_flags
+    return None, normalization_notes, data_quality_flags
 
 
 def apply_stop_checking_price_extra_filters(record: StockRecord) -> List[str]:
@@ -1681,7 +1733,7 @@ def _stop_drawdown_score(record: StockRecord) -> Optional[float]:
         drawdown = _stop_percent_field(record, "max_drawdown_252d")
     if drawdown is None:
         return None
-    return score_high_better(drawdown, -50.0, -15.0)
+    return score_low_better(drawdown, 15.0, 50.0)
 
 
 def _stop_volatility_score(record: StockRecord) -> Optional[float]:
@@ -1854,7 +1906,7 @@ def generate_stop_checking_price_reasons(record: StockRecord, scores: Dict[str, 
         reasons.append("負債水準可控，資產負債表風險較低。")
     if shares_growth_yoy is not None and shares_growth_yoy <= 2.0:
         reasons.append("股本稀釋有限，對每股價值較友善。")
-    if max_drawdown_1y is not None and max_drawdown_1y >= -30.0:
+    if max_drawdown_1y is not None and max_drawdown_1y <= 30.0:
         reasons.append("近一年回撤相對可控。")
     if price_vs_200dma is not None and price_vs_200dma >= 0:
         reasons.append("股價未跌破長期趨勢線，長期趨勢尚未明顯轉弱。")
@@ -1891,7 +1943,7 @@ def generate_stop_checking_price_risk_warnings(record: StockRecord, confidence_s
             warnings.append("負債權益比偏高，景氣下行時風險較大。")
     if shares_growth_yoy is not None and shares_growth_yoy > 5.0:
         warnings.append("股本稀釋偏高，可能壓低每股價值。")
-    if max_drawdown_1y is not None and max_drawdown_1y < -40.0:
+    if max_drawdown_1y is not None and max_drawdown_1y > 40.0:
         warnings.append("近一年最大回撤過深，波動承受度要求較高。")
     if (pe_ratio is not None and pe_ratio > 50) or (ps_ratio is not None and ps_ratio > 20):
         warnings.append("估值偏高，需確認成長能否支撐目前價格。")
@@ -2013,11 +2065,13 @@ def normalization_notes(record: StockRecord) -> List[str]:
     debt_normalized = _debt_to_equity_normalized(record)
     if debt_raw is not None and debt_normalized is not None and debt_raw != debt_normalized:
         notes.append(f"debt_to_equity 已由 raw {debt_raw} 正規化為 {debt_normalized:.2f}。")
+    notes.extend([str(item) for item in (record.raw or {}).get("_normalization_notes", []) if item])
     return notes
 
 
 def data_quality_flags(record: StockRecord, confidence_score: Optional[float] = None) -> List[str]:
     flags: List[str] = []
+    flags.extend([str(item) for item in (record.raw or {}).get("_data_quality_flags", []) if item])
     if _is_fetch_failed_record(record):
         flags.append("抓取失敗，資料缺口可能來自資料源而不是公司本身。")
 
@@ -3345,6 +3399,10 @@ def screen_records(
         _apply_review_metadata(item, is_data_limited=False)
     for item in data_limited_candidates:
         _apply_review_metadata(item, is_data_limited=True)
+    for item in excluded:
+        _apply_non_review_metadata(item)
+    for item in deduped:
+        _apply_non_review_metadata(item)
     review_summary = _build_review_summary([*displayed_candidates, *data_limited_candidates])
     ranking_diagnostics = build_ranking_diagnostics(displayed_candidates)
     soft_penalties: List[Dict[str, Any]] = []
@@ -3574,12 +3632,12 @@ def _render_markdown(report: ScreeningReport) -> str:
         lines.append("")
         lines.append("## 硬性剔除")
         lines.append("")
-        lines.append("| Ticker | Category | Severity | Field | Raw value | Normalized value | Threshold | 原因 |")
-        lines.append("| --- | --- | --- | --- | ---: | ---: | ---: | --- |")
+        lines.append("| Ticker | Category | Severity | Field | Raw value | Normalized value | Threshold | Review required | Review priority | Review cadence | Review reasons | 原因 |")
+        lines.append("| --- | --- | --- | --- | ---: | ---: | ---: | --- | --- | --- | --- | --- |")
         for item in report.hard_excluded:
             detail = item.exclusion_details[0] if item.exclusion_details else {}
             lines.append(
-                "| {ticker} | {category} | {severity} | {field} | {raw} | {normalized} | {threshold} | {reason} |".format(
+                "| {ticker} | {category} | {severity} | {field} | {raw} | {normalized} | {threshold} | {review_required} | {review_priority} | {review_cadence} | {review_reasons} | {reason} |".format(
                     ticker=item.ticker,
                     category=detail.get("category", ""),
                     severity=detail.get("severity", ""),
@@ -3587,8 +3645,24 @@ def _render_markdown(report: ScreeningReport) -> str:
                     raw=detail.get("raw_value", ""),
                     normalized=detail.get("normalized_value", ""),
                     threshold=detail.get("threshold", ""),
+                    review_required=item.review_required,
+                    review_priority=item.review_priority or "",
+                    review_cadence=item.recommended_review_cadence or "",
+                    review_reasons="；".join(item.review_reasons),
                     reason=item.excluded_reason,
                 )
+            )
+    if report.deduped:
+        lines.append("")
+        lines.append("## 去重剔除")
+        lines.append("")
+        lines.append("| Ticker | Kept | Review required | Review priority | Review cadence | Review reasons | 原因 |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+        for item in report.deduped:
+            kept = item.exclusion_details[0].get("threshold") if item.exclusion_details else ""
+            lines.append(
+                f"| {item.ticker} | {kept} | {item.review_required} | {item.review_priority or ''} | "
+                f"{item.recommended_review_cadence or ''} | {'；'.join(item.review_reasons)} | {item.excluded_reason or ''} |"
             )
     if report.soft_penalties:
         lines.append("")
@@ -3796,6 +3870,10 @@ def _render_json(report: ScreeningReport) -> str:
                 "data_quality_flags": item.data_quality_flags,
                 "normalization_notes": item.normalization_notes,
                 "action_cap_reason": item.action_cap_reason,
+                "review_required": item.review_required,
+                "review_priority": item.review_priority,
+                "recommended_review_cadence": item.recommended_review_cadence,
+                "review_reasons": item.review_reasons,
             }
             for item in report.hard_excluded
         ],
@@ -3807,6 +3885,10 @@ def _render_json(report: ScreeningReport) -> str:
                 "exclusion_reasons": item.exclusion_reasons,
                 "exclusion_details": item.exclusion_details,
                 "kept": item.exclusion_details[0].get("threshold") if item.exclusion_details else None,
+                "review_required": item.review_required,
+                "review_priority": item.review_priority,
+                "recommended_review_cadence": item.recommended_review_cadence,
+                "review_reasons": item.review_reasons,
             }
             for item in report.deduped
         ],

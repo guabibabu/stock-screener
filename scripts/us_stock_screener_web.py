@@ -285,6 +285,7 @@ def _report_to_payload(report: Any, *, source_name: str, bundle: Any = None) -> 
         },
         "candidates": [_result_to_payload(item) for item in report.candidates],
         "hard_excluded": [_result_to_payload(item) for item in report.hard_excluded],
+        "deduped": [_result_to_payload(item) for item in report.deduped],
         "data_limited_candidates": [_result_to_payload(item) for item in report.data_limited_candidates],
         "soft_penalties": report.soft_penalties,
         "missing_data_warnings": report.missing_data_warnings,
@@ -796,7 +797,16 @@ INDEX_HTML = r"""<!doctype html>
         lines.push('');
         report.hard_excluded.forEach(item => {
           const d = (item.exclusion_details || [])[0] || {};
-          lines.push(`- ${item.ticker}：${item.excluded_reason || ''}｜類別 ${d.category || 'N/A'}｜嚴重度 ${d.severity || 'normal'}｜原始值 ${d.raw_value ?? 'N/A'}｜正規化 ${d.normalized_value ?? 'N/A'}｜門檻 ${d.threshold ?? 'N/A'}`);
+          lines.push(`- ${item.ticker}：${item.excluded_reason || ''}｜類別 ${d.category || 'N/A'}｜嚴重度 ${d.severity || 'normal'}｜原始值 ${d.raw_value ?? 'N/A'}｜正規化 ${d.normalized_value ?? 'N/A'}｜門檻 ${d.threshold ?? 'N/A'}｜Review required ${item.review_required}｜Review priority ${item.review_priority || 'routine'}｜Review cadence ${item.recommended_review_cadence || 'N/A'}｜Review reasons ${(item.review_reasons && item.review_reasons.length) ? item.review_reasons.join('；') : '無'}`);
+        });
+      }
+      if (report.deduped && report.deduped.length) {
+        lines.push('');
+        lines.push('去重剔除');
+        lines.push('');
+        report.deduped.forEach(item => {
+          const kept = ((item.exclusion_details || [])[0] || {}).threshold ?? 'N/A';
+          lines.push(`- ${item.ticker}：${item.excluded_reason || ''}｜保留 ${kept}｜Review required ${item.review_required}｜Review priority ${item.review_priority || 'routine'}｜Review cadence ${item.recommended_review_cadence || 'N/A'}｜Review reasons ${(item.review_reasons && item.review_reasons.length) ? item.review_reasons.join('；') : '無'}`);
         });
       }
       if (report.soft_penalties && report.soft_penalties.length) {
@@ -884,7 +894,11 @@ INDEX_HTML = r"""<!doctype html>
     function renderExclusions(report) {
       const hard = (report.hard_excluded || []).slice(0, 80).map(item => {
         const d = (item.exclusion_details || [])[0] || {};
-        return `- ${item.ticker}：${item.excluded_reason || ''}｜類別 ${d.category || 'N/A'}｜嚴重度 ${d.severity || 'normal'}｜門檻 ${d.threshold ?? 'N/A'}`;
+        return `- ${item.ticker}：${item.excluded_reason || ''}｜類別 ${d.category || 'N/A'}｜嚴重度 ${d.severity || 'normal'}｜門檻 ${d.threshold ?? 'N/A'}｜Review required ${item.review_required}｜Review priority ${item.review_priority || 'routine'}｜Review cadence ${item.recommended_review_cadence || 'N/A'}｜Review reasons ${(item.review_reasons && item.review_reasons.length) ? item.review_reasons.join('；') : '無'}`;
+      });
+      const deduped = (report.deduped || []).slice(0, 80).map(item => {
+        const kept = ((item.exclusion_details || [])[0] || {}).threshold ?? 'N/A';
+        return `- ${item.ticker}：${item.excluded_reason || ''}｜保留 ${kept}｜Review required ${item.review_required}｜Review priority ${item.review_priority || 'routine'}｜Review cadence ${item.recommended_review_cadence || 'N/A'}｜Review reasons ${(item.review_reasons && item.review_reasons.length) ? item.review_reasons.join('；') : '無'}`;
       });
       const missing = (report.missing_data_warnings || []).slice(0, 80).map(item => {
         const cap = item.action_cap_reason ? `｜動作限制：${item.action_cap_reason}` : '';
@@ -901,6 +915,9 @@ INDEX_HTML = r"""<!doctype html>
         '',
         '硬性剔除：',
         ...(hard.length ? hard : ['沒有硬性剔除。']),
+        '',
+        '去重剔除：',
+        ...(deduped.length ? deduped : ['沒有去重剔除。']),
         '',
         '資料缺口：',
         ...(missing.length ? missing : ['沒有資料缺口提示。'])

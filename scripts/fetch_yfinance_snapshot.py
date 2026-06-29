@@ -32,6 +32,13 @@ RETRYABLE_ERROR_KEYWORDS = (
     "remote end closed",
 )
 MARKET_CONTEXT_INDEX_TICKERS = ("SPY", "QQQ", "^VIX")
+PROVIDER_RATIO_PERCENT_FIELD_MAP = {
+    "revenueGrowth": "revenue_growth_yoy",
+    "earningsGrowth": "eps_growth_yoy",
+    "grossMargins": "gross_margin",
+    "operatingMargins": "operating_margin",
+    "returnOnEquity": "return_on_equity",
+}
 
 
 class YFinanceUnavailableError(RuntimeError):
@@ -85,13 +92,11 @@ def _clean_metadata_text(value: Any) -> Optional[str]:
     return text or None
 
 
-def _safe_percent(value: Any) -> Optional[float]:
+def _provider_ratio_to_percent_points(value: Any) -> Optional[float]:
     number = _coerce_float(value)
     if number is None:
         return None
-    if abs(number) <= 1.5:
-        return number * 100.0
-    return number
+    return number * 100.0
 
 
 def _parse_date(value: Any) -> Optional[date]:
@@ -400,11 +405,11 @@ def _build_record(
         "market_cap": market_cap,
         "avg_dollar_volume_20d": avg_dollar_volume_20d,
         "avg_volume_20d": avg_volume_20d,
-        "revenue_growth_yoy": _safe_percent(_pick(info, "revenueGrowth")),
-        "eps_growth_yoy": _safe_percent(_pick(info, "earningsGrowth")),
-        "gross_margin": _safe_percent(_pick(info, "grossMargins")),
-        "operating_margin": _safe_percent(_pick(info, "operatingMargins")),
-        "return_on_equity": _safe_percent(_pick(info, "returnOnEquity")),
+        "revenue_growth_yoy": _provider_ratio_to_percent_points(_pick(info, "revenueGrowth")),
+        "eps_growth_yoy": _provider_ratio_to_percent_points(_pick(info, "earningsGrowth")),
+        "gross_margin": _provider_ratio_to_percent_points(_pick(info, "grossMargins")),
+        "operating_margin": _provider_ratio_to_percent_points(_pick(info, "operatingMargins")),
+        "return_on_equity": _provider_ratio_to_percent_points(_pick(info, "returnOnEquity")),
         "free_cash_flow": free_cash_flow,
         "roic": None,
         "shares_growth_yoy": shares_growth_yoy,
@@ -433,6 +438,7 @@ def _build_record(
         "notes": "; ".join(notes) if notes else None,
         "raw": {
             "source": "yfinance",
+            "provider_percent_ratio_field_map": PROVIDER_RATIO_PERCENT_FIELD_MAP,
             "history_points": len(history_rows),
             "latest_history_date": latest_history_date.isoformat() if latest_history_date is not None else None,
             "latest_close": latest_close,

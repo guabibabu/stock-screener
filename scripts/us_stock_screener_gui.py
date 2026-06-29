@@ -1486,9 +1486,27 @@ def report_to_text(report, source_name: str, bundle=None) -> str:
                 f"｜原始值 {detail.get('raw_value', 'N/A')}"
                 f"｜正規化 {detail.get('normalized_value', 'N/A')}"
                 f"｜門檻 {detail.get('threshold', 'N/A')}"
+                f"｜Review required {item.review_required}"
+                f"｜Review priority {item.review_priority}"
+                f"｜Review cadence {item.recommended_review_cadence or 'N/A'}"
+                f"｜Review reasons {'；'.join(item.review_reasons) or '無'}"
             )
             if item.confidence_notes:
                 lines.append(f"  提醒：{'；'.join(item.confidence_notes)}")
+    if report.deduped:
+        lines.append("")
+        lines.append("去重剔除")
+        lines.append("")
+        for item in report.deduped:
+            kept = item.exclusion_details[0].get("threshold", "N/A") if item.exclusion_details else "N/A"
+            lines.append(
+                f"- {item.ticker}：{item.excluded_reason}"
+                f"｜保留 {kept}"
+                f"｜Review required {item.review_required}"
+                f"｜Review priority {item.review_priority}"
+                f"｜Review cadence {item.recommended_review_cadence or 'N/A'}"
+                f"｜Review reasons {'；'.join(item.review_reasons) or '無'}"
+            )
     if report.soft_penalties:
         lines.append("")
         lines.append("扣分標記")
