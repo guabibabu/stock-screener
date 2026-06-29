@@ -3598,13 +3598,13 @@ def _render_markdown(report: ScreeningReport) -> str:
     lines.append("")
     lines.append("## 候選名單")
     lines.append("")
-    lines.append("| 排名 | Ticker | 總分 | Base score | Regime delta | Official source | Legacy score | Sector-aware preview | Peer source | Peer count | Peer reason | 資料品質 | 動作 | Review priority | Review cadence | Review reasons | 基本面 | 動量 | 風險安全 | 主要理由 | 風險警示 |")
-    lines.append("| --- | --- | ---: | ---: | ---: | --- | ---: | --- | --- | ---: | --- | ---: | --- | --- | --- | --- | ---: | ---: | ---: | --- | --- |")
+    lines.append("| 排名 | Ticker | 總分 | Base score | Regime delta | Official source | Legacy score | Sector-aware preview | Peer source | Peer count | Peer reason | 資料品質 | 動作 | Review required | Review priority | Review cadence | Review reasons | 基本面 | 動量 | 風險安全 | 主要理由 | 風險警示 |")
+    lines.append("| --- | --- | ---: | ---: | ---: | --- | ---: | --- | --- | ---: | --- | ---: | --- | --- | --- | --- | --- | ---: | ---: | ---: | --- | --- |")
     for index, item in enumerate(report.candidates, start=1):
         warnings = "；".join(item.risk_warnings) if item.risk_warnings else "無"
         reasons = "；".join(item.reasons)
         lines.append(
-            "| {rank} | {ticker} | {total} | {base_total} | {regime_delta} | {official_source} | {legacy_total} | {sector_preview} | {peer_source} | {peer_count} | {peer_reason} | {data_quality} | {action} | {review_priority} | {review_cadence} | {review_reasons} | {fundamental} | {momentum} | {risk} | {reasons} | {warnings} |".format(
+            "| {rank} | {ticker} | {total} | {base_total} | {regime_delta} | {official_source} | {legacy_total} | {sector_preview} | {peer_source} | {peer_count} | {peer_reason} | {data_quality} | {action} | {review_required} | {review_priority} | {review_cadence} | {review_reasons} | {fundamental} | {momentum} | {risk} | {reasons} | {warnings} |".format(
                 rank=index,
                 ticker=item.ticker,
                 total=item.total_score if item.total_score is not None else "",
@@ -3618,6 +3618,7 @@ def _render_markdown(report: ScreeningReport) -> str:
                 peer_reason=item.sector_relative_peer_reason or "",
                 data_quality=item.data_quality_score if item.data_quality_score is not None else "",
                 action=item.suggested_action or "",
+                review_required=item.review_required,
                 review_priority=item.review_priority or "",
                 review_cadence=item.recommended_review_cadence or "",
                 review_reasons="；".join(item.review_reasons),
@@ -3688,14 +3689,15 @@ def _render_markdown(report: ScreeningReport) -> str:
         lines.append("")
         lines.append("## Data-limited Candidates")
         lines.append("")
-        lines.append("| Ticker | Official source | 總分 | Legacy score | Action | Review priority | Review cadence | Review reasons | 原因 |")
-        lines.append("| --- | --- | ---: | ---: | --- | --- | --- | --- | --- |")
+        lines.append("| Ticker | Official source | 總分 | Legacy score | Action | Review required | Review priority | Review cadence | Review reasons | 原因 |")
+        lines.append("| --- | --- | ---: | ---: | --- | --- | --- | --- | --- | --- |")
         for item in report.data_limited_candidates:
             lines.append(
                 f"| {item.ticker} | {item.official_score_source or ''} | "
                 f"{item.total_score if item.total_score is not None else ''} | "
                 f"{item.legacy_total_score if item.legacy_total_score is not None else ''} | "
                 f"{item.suggested_action or ''} | "
+                f"{item.review_required} | "
                 f"{item.review_priority or ''} | "
                 f"{item.recommended_review_cadence or ''} | "
                 f"{'；'.join(item.review_reasons)} | "

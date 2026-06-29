@@ -69,6 +69,14 @@ class CountingPayloadProvider:
 
 
 class ScreenerTests(unittest.TestCase):
+    def _markdown_section(self, markdown: str, heading: str) -> str:
+        marker = f"## {heading}"
+        start = markdown.index(marker)
+        next_heading = markdown.find("\n## ", start + len(marker))
+        if next_heading == -1:
+            return markdown[start:]
+        return markdown[start:next_heading]
+
     def setUp(self) -> None:
         self.config = ScreenConfig()
 
@@ -1350,6 +1358,67 @@ class ScreenerTests(unittest.TestCase):
         self.assertIn("review_priority", web_payload["candidates"][0])
         self.assertIn("recommended_review_cadence", web_payload["candidates"][0])
         self.assertIn("review_reasons", web_payload["candidates"][0])
+
+    def test_markdown_candidate_section_has_review_required_column(self) -> None:
+        report = build_report([self._sector_preview_record("GOOG")], self.config, strategy_mode="hybrid", top_n=1)
+        section = self._markdown_section(screener._render_markdown(report), "候選名單")
+        self.assertIn("| Review required | Review priority | Review cadence | Review reasons |", section)
+        self.assertIn("| 1 | GOOG |", section)
+        self.assertIn("| True | routine | weekly | hybrid_weekly_candidate_review |", section)
+
+    def test_markdown_data_limited_section_has_review_required_column(self) -> None:
+        records = [self._sector_preview_record(f"TECH{index:02d}", sector="Technology", industry="Software") for index in range(30)]
+        records.append(self._sector_preview_record("NOMETA", sector=None, industry=None, revenue_growth_yoy=30, eps_growth_yoy=29))
+        report = build_report(records, self.config, strategy_mode="hybrid", top_n=5)
+        section = self._markdown_section(screener._render_markdown(report), "Data-limited Candidates")
+        self.assertIn("| Ticker | Official source | 總分 | Legacy score | Action | Review required | Review priority | Review cadence | Review reasons | 原因 |", section)
+        self.assertIn("| NOMETA | legacy_missing_metadata |", section)
+        self.assertIn("| True | prompt | prompt_manual_review | data_limited_candidate |", section)
+
+    def test_markdown_hard_excluded_section_has_all_review_columns(self) -> None:
+        report = build_report(
+            [self._sector_preview_record("GOOG"), {"ticker": "PENNY", "price": 2.0, "market_cap": 10_000_000_000, "avg_dollar_volume_20d": 90_000_000}],
+            self.config,
+            strategy_mode="hybrid",
+            top_n=3,
+        )
+        section = self._markdown_section(screener._render_markdown(report), "硬性剔除")
+        self.assertIn("| Review required | Review priority | Review cadence | Review reasons |", section)
+        self.assertIn("| PENNY | min_price |", section)
+        self.assertIn("| False | routine |  |  |", section)
+
+    def test_markdown_deduped_section_has_all_review_columns(self) -> None:
+        report = build_report(
+            [self._sector_preview_record("GOOG"), self._sector_preview_record("GOOGL")],
+            self.config,
+            strategy_mode="hybrid",
+            top_n=3,
+        )
+        section = self._markdown_section(screener._render_markdown(report), "去重剔除")
+        self.assertIn("| Ticker | Kept | Review required | Review priority | Review cadence | Review reasons | 原因 |", section)
+        self.assertIn("| GOOGL | keep_one_per_company:GOOG | False | routine |  |  |", section)
+
+    def test_ai_strategy_doc_uses_percent_point_thresholds_for_current_rules(self) -> None:
+        text = Path("AI策略優化簡報.md").read_text(encoding="utf-8")
+        forbidden_lines = [
+            "`operating_margin_ttm < -0.20`",
+            "`shares_growth_yoy > 0.05`",
+            "`shares_growth_3y_cagr > 0.05`",
+            "`revenue_growth_yoy < -0.05`",
+            "`volatility_1y > 0.80`",
+        ]
+        for line in forbidden_lines:
+            self.assertNotIn(line, text)
+        required_lines = [
+            "`operating_margin_ttm < -20.0`",
+            "`shares_growth_yoy > 5.0`",
+            "`shares_growth_3y_cagr > 5.0`",
+            "`revenue_growth_yoy < -5.0`",
+            "`volatility_1y > 80.0`",
+            "`max_drawdown_1y > 40.0`",
+        ]
+        for line in required_lines:
+            self.assertIn(line, text)
 
     def test_sector_aware_winsorization_limits_outlier_effect(self) -> None:
         records = [

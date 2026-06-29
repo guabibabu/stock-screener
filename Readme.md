@@ -8,10 +8,24 @@
 
 | 版本 | 適合誰 | 啟動方式 |
 |---|---|---|
-| 網頁版 | 推薦，一般使用最順 | 雙擊 `launch_us_stock_screener_web.command` |
-| 桌面版 | 備用，傳統視窗介面 | 雙擊 `launch_us_stock_screener.command` |
+| 網頁版 | 推薦，一般使用最順 | `bash launch_us_stock_screener_web.command` |
+| 桌面版 | 備用，傳統視窗介面 | `bash launch_us_stock_screener.command` |
 
-建議先用網頁版。
+建議先用網頁版。正式支援的啟動方式是先安裝依賴，再用 `bash ...command` 啟動。
+
+```bash
+python3 -m pip install -r requirements.txt
+bash launch_us_stock_screener_web.command
+```
+
+桌面版則是：
+
+```bash
+python3 -m pip install -r requirements.txt
+bash launch_us_stock_screener.command
+```
+
+如果你是直接從 Git source checkout，且 `.command` 仍保留 executable bit，macOS Finder 通常也可以雙擊；但這不是主要支援路徑。
 
 網頁版啟動後，如果瀏覽器沒有自動打開，可以手動開：
 

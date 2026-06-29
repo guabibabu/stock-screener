@@ -299,9 +299,9 @@ Earnings stability 使用：
 Stop mode 有一些額外硬性剔除，但只在欄位可取得時使用：
 
 - `price_data_age_days > 30`：價格資料超過 30 天，過舊
-- `operating_margin_ttm < -0.20`：營業利益率嚴重為負
+- `operating_margin_ttm < -20.0`：營業利益率嚴重為負
 - `debt_to_equity_normalized > 10` 且不是特殊產業：負債權益比極端異常
-- `shares_growth_yoy > 0.20`：股本稀釋嚴重
+- `shares_growth_yoy > 20.0`：股本稀釋嚴重
 
 金融、銀行、保險、REIT、Utilities 會使用 sector-aware debt logic，不直接用一般負債權益比門檻硬剔除。
 
@@ -339,12 +339,12 @@ Stop mode 會套用 soft penalty，總扣分上限為 25 分。
 - `peg_ratio > 3`：扣 4
 - `debt_to_equity > 2.0`：扣 8
 - `net_debt_to_ebitda > 4.0`：扣 8
-- `shares_growth_yoy > 0.05`：扣 6
-- `shares_growth_3y_cagr > 0.05`：扣 8
-- `revenue_growth_yoy < -0.05`：扣 6
-- `eps_growth_yoy < -0.10`：扣 6
-- `max_drawdown_1y > 40`：扣 8
-- `volatility_1y > 0.80`：扣 6
+- `shares_growth_yoy > 5.0`：扣 6
+- `shares_growth_3y_cagr > 5.0`：扣 8
+- `revenue_growth_yoy < -5.0`：扣 6
+- `eps_growth_yoy < -10.0`：扣 6
+- `max_drawdown_1y > 40.0`：扣 8
+- `volatility_1y > 80.0`：扣 6
 - `price_data_age_days > 7`：扣 8
 - `price_data_age_days > 3`：扣 4
 
